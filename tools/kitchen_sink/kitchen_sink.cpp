@@ -1136,7 +1136,7 @@ std::vector<size_t> get_channels(const std::string& channel_list, size_t max = -
     for (size_t ch = 0; ch < channel_strings.size(); ch++)
     {
         size_t chan = boost::lexical_cast<int>(channel_strings[ch]);
-        if ((max >= 0) && (chan >= max)) {
+        if ((max != -1) && (chan >= max)) {
             throw std::runtime_error("Invalid channel(s) specified.");
         }
         else {
@@ -1788,7 +1788,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
             running = true;
             std::cout << HEADER "Begin..." << std::endl;
 
-            thread_group.create_thread(boost::bind(&check_thread, usrp));
+            //thread_group.create_thread(boost::bind(&check_thread, usrp));
 
             if (tx_channel_nums.size() > 0)
                 tx_thread_begin.wait(l_tx);
