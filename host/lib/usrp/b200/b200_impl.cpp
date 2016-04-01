@@ -991,6 +991,8 @@ void b200_impl::set_fp_gpio(gpio_core_200::sptr gpio, const gpio_attr_t attr, co
 
 void b200_impl::update_clock_source(const std::string &source)
 {
+    UHD_MSG(status) << "Changing clock source to: " << source << std::endl;
+    
     // For B205, ref_sel selects whether or not to lock to the external clock source
     if (_product == B205)
     {
