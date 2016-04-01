@@ -21,6 +21,13 @@
 #include <boost/format.hpp>
 #include <iostream>
 
+#if defined(macintosh) || defined(__APPLE__) || defined(__APPLE_CC__) || \
+    defined(__FreeBSD__)
+#include <mach/mach_init.h>
+#include <mach/task_policy.h>
+#include <mach/task.h>
+#endif
+
 bool uhd::set_thread_priority_safe(float priority, bool realtime){
     try{
         set_thread_priority(priority, realtime);
@@ -50,7 +57,7 @@ static void check_priority_range(float priority){
         check_priority_range(priority);
 
         //when realtime is not enabled, use sched other
-        int policy = (realtime)? SCHED_RR : SCHED_OTHER;
+        int policy = (realtime)? /*SCHED_RR*/SCHED_FIFO : SCHED_OTHER;
 
         //we cannot have below normal priority, set to zero
         if (priority < 0) priority = 0;
@@ -65,6 +72,36 @@ static void check_priority_range(float priority){
         sp.sched_priority = int(priority*(max_pri - min_pri)) + min_pri;
         int ret = pthread_setschedparam(pthread_self(), policy, &sp);
         if (ret != 0) throw uhd::os_error("error in pthread_setschedparam");
+
+#if defined(macintosh) || defined(__APPLE__) || defined(__APPLE_CC__) || defined(__FreeBSD__)
+    struct task_qos_policy qosinfo;
+    qosinfo.task_latency_qos_tier = LATENCY_QOS_TIER_0;
+    qosinfo.task_throughput_qos_tier = THROUGHPUT_QOS_TIER_0;
+
+    ret = task_policy_set(mach_task_self(), TASK_OVERRIDE_QOS_POLICY, (task_policy_t)&qosinfo, TASK_QOS_POLICY_COUNT);
+    if (ret == 0)
+    {
+      fprintf(stderr, "Successfully set mach task QoS\n");
+    }
+    else
+    {
+      fprintf(stderr, "Failed to set mach task QoS!\n");
+    }
+
+    struct task_category_policy tcatpolicy;
+
+    tcatpolicy.role = TASK_FOREGROUND_APPLICATION;
+
+    ret = task_policy_set(mach_task_self(), TASK_CATEGORY_POLICY, (thread_policy_t)&tcatpolicy, TASK_CATEGORY_POLICY_COUNT);
+    if (ret == KERN_SUCCESS)
+    {
+        fprintf(stderr, "Successfully set mach task category\n");
+    }
+    else
+    {
+        fprintf(stderr, "Failed to set mach task category!\n");
+    }
+#endif
     }
 #endif /* HAVE_PTHREAD_SETSCHEDPARAM */
 

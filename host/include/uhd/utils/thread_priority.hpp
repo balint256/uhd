@@ -22,7 +22,7 @@
 
 namespace uhd{
 
-    static const float default_thread_priority = float(0.5);
+    static const float default_thread_priority = float(/*0.5*/1.0);
 
     /*!
      * Set the scheduling priority on the current thread.
