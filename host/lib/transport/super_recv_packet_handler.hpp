@@ -46,6 +46,8 @@
 #include "boost/date_time/posix_time/posix_time.hpp"
 #endif
 
+//#define USE_THREADS
+
 namespace uhd{ namespace transport{ namespace sph{
 
 UHD_INLINE boost::uint32_t get_context_code(
@@ -92,22 +94,28 @@ public:
     }
 
     ~recv_packet_handler(void){
+#ifdef USE_THREADS
         _task_barrier.interrupt();
         _task_handlers.clear();
+#endif
     }
 
     //! Resize the number of transport channels
     void resize(const size_t size){
         if (this->size() == size) return;
+#ifdef USE_THREADS
         _task_handlers.clear();
+#endif
         _props.resize(size);
         //re-initialize all buffers infos by re-creating the vector
         _buffers_infos = std::vector<buffers_info_type>(4, buffers_info_type(size));
+#ifdef USE_THREADS
         _task_barrier.resize(size);
         _task_handlers.resize(size);
         for (size_t i = 1/*skip 0*/; i < size; i++){
             _task_handlers[i] = task::make(boost::bind(&recv_packet_handler::converter_thread_task, this, i));
         };
+#endif
     }
 
     //! Get the channel width of this handler
@@ -655,10 +663,13 @@ private:
         _convert_buffs = &buffs;
         _convert_buffer_offset_bytes = buffer_offset_bytes;
         _convert_bytes_to_copy = bytes_to_copy;
-
+#ifdef USE_THREADS
         //perform N channels of conversion
         converter_thread_task(0);
-
+#else
+        for(unsigned int i = 0; i < _props.size(); i++)
+            converter_thread_task(i);
+#endif
         //update the copy buffer's availability
         info.data_bytes_to_copy -= bytes_to_copy;
 
@@ -677,8 +688,9 @@ private:
      ******************************************************************/
     UHD_INLINE void converter_thread_task(const size_t index)
     {
+#ifdef USE_THREADS
         _task_barrier.wait();
-
+#endif
         //shortcut references to local data structures
         buffers_info_type &buff_info = get_curr_buffer_info();
         per_buffer_info_type &info = buff_info[index];
@@ -702,13 +714,16 @@ private:
         if (buff_info.data_bytes_to_copy == _convert_bytes_to_copy){
             info.buff.reset(); //effectively a release
         }
-
+#ifdef USE_THREADS
         if (index == 0) _task_barrier.wait_others();
+#endif
     }
 
     //! Shared variables for the worker threads
+#ifdef USE_THREADS
     reusable_barrier _task_barrier;
     std::vector<task::sptr> _task_handlers;
+#endif
     size_t _convert_nsamps;
     const rx_streamer::buffs_type *_convert_buffs;
     size_t _convert_buffer_offset_bytes;
