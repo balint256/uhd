@@ -43,7 +43,7 @@ namespace uhd{
          * \param task_fcn the task callback function
          * \return a new task object
          */
-        static sptr make(const task_fcn_type &task_fcn);
+        static sptr make(const task_fcn_type &task_fcn, bool realtime = false);
 
     };
 } //namespace uhd

@@ -18,6 +18,7 @@
 #include <uhd/utils/tasks.hpp>
 #include <uhd/utils/msg_task.hpp>
 #include <uhd/utils/msg.hpp>
+#include <uhd/utils/thread_priority.hpp>
 #include <boost/thread/thread.hpp>
 #include <boost/thread/barrier.hpp>
 #include <exception>
@@ -29,8 +30,9 @@ using namespace uhd;
 class task_impl : public task{
 public:
 
-    task_impl(const task_fcn_type &task_fcn):
-        _spawn_barrier(2)
+    task_impl(const task_fcn_type &task_fcn, bool realtime = false):
+        _spawn_barrier(2),
+        _realtime(realtime)
     {
         _thread_group.create_thread(boost::bind(&task_impl::task_loop, this, task_fcn));
         _spawn_barrier.wait();
@@ -46,6 +48,8 @@ private:
 
     void task_loop(const task_fcn_type &task_fcn){
         _running = true;
+        if (_realtime)
+            uhd::set_thread_priority_safe();
         _spawn_barrier.wait();
 
         try{
@@ -76,11 +80,11 @@ private:
 
     boost::thread_group _thread_group;
     boost::barrier _spawn_barrier;
-    bool _running;
+    bool _running, _realtime;
 };
 
-task::sptr task::make(const task_fcn_type &task_fcn){
-    return task::sptr(new task_impl(task_fcn));
+task::sptr task::make(const task_fcn_type &task_fcn, bool realtime){
+    return task::sptr(new task_impl(task_fcn, realtime));
 }
 
 msg_task::~msg_task(void){

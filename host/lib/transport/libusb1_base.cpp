@@ -44,7 +44,9 @@ public:
     libusb_session_impl(void){
         UHD_ASSERT_THROW(libusb_init(&_context) == 0);
         libusb_set_debug(_context, debug_level);
-        task_handler = task::make(boost::bind(&libusb_session_impl::libusb_event_handler_task, this, _context));
+#ifdef SEPARATE_LIBUSB_THREAD
+        task_handler = task::make(boost::bind(&libusb_session_impl::libusb_event_handler_task, this, _context)/*, true*/);
+#endif // SEPARATE_LIBUSB_THREAD
     }
 
     ~libusb_session_impl(void){
@@ -66,6 +68,7 @@ private:
      * The libusb documentation says it is safe, which it is, but it neglects to state the cost in CPU usage.
      * Just don't do it!
      */
+#ifdef SEPARATE_LIBUSB_THREAD
     UHD_INLINE void libusb_event_handler_task(libusb_context *context)
     {
         timeval tv;
@@ -84,6 +87,7 @@ private:
             break;
         }
     }
+#endif // SEPARATE_LIBUSB_THREAD
 };
 
 libusb::session::sptr libusb::session::get_global_session(void){

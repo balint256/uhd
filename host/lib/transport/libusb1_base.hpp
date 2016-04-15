@@ -24,6 +24,8 @@
 #include <uhd/transport/usb_device_handle.hpp>
 #include <libusb.h>
 
+#define SEPARATE_LIBUSB_THREAD
+
 //! Define LIBUSB_CALL when its missing (non-windows)
 #ifndef LIBUSB_CALL
     #define LIBUSB_CALL

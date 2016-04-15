@@ -63,11 +63,13 @@ struct lut_result_t
         buff_num = -1;
 #endif
     }
-    int completed;
+    volatile int completed;
     libusb_transfer_status status;
     int actual_length;
+#ifdef SEPARATE_LIBUSB_THREAD
     boost::mutex mut;
     boost::condition_variable usb_transfer_complete;
+#endif // SEPARATE_LIBUSB_THREAD
 
 #ifdef UHD_TXRX_DEBUG_PRINTS
     // These are fore debugging
@@ -101,11 +103,15 @@ static void libusb1_zerocopy_dbg_print_err(std::string msg){
 static void LIBUSB_CALL libusb_async_cb(libusb_transfer *lut)
 {
     lut_result_t *r = (lut_result_t *)lut->user_data;
+#ifdef SEPARATE_LIBUSB_THREAD
     boost::lock_guard<boost::mutex> lock(r->mut);
+#endif // SEPARATE_LIBUSB_THREAD
     r->status = lut->status;
     r->actual_length = lut->actual_length;
     r->completed = 1;
+#ifdef SEPARATE_LIBUSB_THREAD
     r->usb_transfer_complete.notify_one();  // wake up thread waiting in wait_for_completion() member function below
+#endif // SEPARATE_LIBUSB_THREAD
 #ifdef UHD_TXRX_DEBUG_PRINTS
     long end_time = boost::get_system_time().time_of_day().total_microseconds();
     libusb1_zerocopy_dbg_print_err( (boost::format("libusb_async_cb,%s,%i,%i,%i,%ld,%ld") % (r->is_recv ? "rx":"tx") % r->buff_num % r->actual_length % r->status % end_time % r->start_time).str() );
@@ -166,15 +172,57 @@ public:
      * \param timeout the wait timeout in seconds.  A negative value will wait forever.
      * \return true for completion, false for timeout
      */
+#ifndef SEPARATE_LIBUSB_THREAD
+    UHD_INLINE int handle_events(timeval& tv)
+    {
+        int ret = libusb_handle_events_timeout(_ctx, &tv);
+        switch (ret)
+        {
+        case LIBUSB_SUCCESS:
+        case LIBUSB_ERROR_TIMEOUT:
+            break;
+        case LIBUSB_ERROR_NO_DEVICE:
+            throw uhd::io_error(libusb_strerror(LIBUSB_ERROR_NO_DEVICE));
+        default:
+            UHD_MSG(error) << __FUNCTION__ << ": " << libusb_strerror((libusb_error)ret) << std::endl;
+            break;
+        }
+        return ret;
+    }
+#endif // ! SEPARATE_LIBUSB_THREAD
     UHD_INLINE bool wait_for_completion(const double timeout)
     {
+#ifdef SEPARATE_LIBUSB_THREAD
         boost::unique_lock<boost::mutex> lock(result.mut);
+#endif // SEPARATE_LIBUSB_THREAD
         if (!result.completed) {
+#ifndef SEPARATE_LIBUSB_THREAD
+        timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+        handle_events(tv);
+
+        if (result.completed) return (result.completed > 0);
+#endif // ! SEPARATE_LIBUSB_THREAD
+#ifdef SEPARATE_LIBUSB_THREAD
             if (timeout < 0.0) {
                 result.usb_transfer_complete.wait(lock);
-            } else {
+            }
+            else
+#endif // SEPARATE_LIBUSB_THREAD
+            {
                 const boost::system_time timeout_time = boost::get_system_time() + boost::posix_time::microseconds(long(timeout*1000000));
+#ifdef SEPARATE_LIBUSB_THREAD
                 result.usb_transfer_complete.timed_wait(lock, timeout_time, lut_result_completed(result));
+#else
+                while ((result.completed <= 0) && ((timeout < 0.0) || (boost::get_system_time() < timeout_time)))
+                {
+                    timeval tv;
+                    tv.tv_sec = 0;
+                    tv.tv_usec = 10*1000;   // MAGIC
+                    handle_events(tv);
+                }
+#endif // SEPARATE_LIBUSB_THREAD
             }
         }
         return (result.completed > 0);
