@@ -148,7 +148,8 @@ public:
     {
         if (wait_for_completion(timeout))
         {
-            if (result.status != LIBUSB_TRANSFER_COMPLETED)
+			if (result.status == LIBUSB_TRANSFER_CANCELLED) UHD_MSG(warning) << boost::format("usb %s transfer cancelled") % _name << std::endl;
+            else if (result.status != LIBUSB_TRANSFER_COMPLETED)
                 throw uhd::io_error(str(boost::format("usb %s transfer status: %d")
                                         % _name % libusb_error_name(result.status)));
             result.completed = 0;
@@ -303,10 +304,34 @@ public:
             _buff_ready_cond.timed_wait(queue_lock, boost::posix_time::microseconds(long(timeout*1e6)));
         }
         if (_enqueued.empty()) return buff;
-        libusb_zero_copy_mb *front = _enqueued.front();
 
-        queue_lock.unlock();
-        buff = front->get_new<buffer_type>(timeout);
+		while (true)
+		{
+			libusb_zero_copy_mb *front = _enqueued.front();
+
+			queue_lock.unlock();
+
+			buff = front->get_new<buffer_type>(timeout);
+
+			if (buff)
+			{
+				if (((libusb_zero_copy_mb*)buff.get())->result.status == LIBUSB_TRANSFER_CANCELLED)
+				{
+					buff = buffer_type::sptr();	// Will fire release and re-submission
+
+					queue_lock.lock();
+
+					_enqueued.pop_front();
+
+					continue;
+				}
+				else
+					break;
+			}
+			else
+				break;
+		}
+
         queue_lock.lock();
 
         if (buff) _enqueued.pop_front();

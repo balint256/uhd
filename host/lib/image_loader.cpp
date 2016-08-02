@@ -66,7 +66,7 @@ bool uhd::image_loader::load(const uhd::image_loader::image_loader_args_t &image
             throw uhd::runtime_error(str(boost::format("There is no image loader registered for given type \"%s\".")
                                          % type));
         }
-        else return get_image_loaders().at(type)(image_loader_args);
+        else return get_image_loaders()[type](image_loader_args);
     }
     else{
         BOOST_FOREACH(const loader_fcn_pair_t &loader_fcn_pair, get_image_loaders()){
@@ -83,5 +83,5 @@ std::string uhd::image_loader::get_recovery_instructions(const std::string &devi
     if(get_recovery_strings().count(device_type) == 0){
         return "A firmware or FPGA loading process was interrupted by the user. This can leave your device in a non-working state.";
     }
-    else return get_recovery_strings().at(device_type);
+    else return get_recovery_strings()[device_type];
 }
