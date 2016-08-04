@@ -694,11 +694,26 @@ b200_impl::b200_impl(const uhd::device_addr_t& device_addr, usb_device_handle::s
     }
     _tree->access<subdev_spec_t>(mb_path / "rx_subdev_spec").set(rx_spec);
     _tree->access<subdev_spec_t>(mb_path / "tx_subdev_spec").set(tx_spec);
-
+#if 0
     //init to internal clock and time source
     _tree->access<std::string>(mb_path / "clock_source/value").set("internal");
     _tree->access<std::string>(mb_path / "time_source/value").set("internal");
-
+#else
+    //GPS installed: use external ref, time, and init time spec
+    if (_gps and _gps->gps_detected())
+    {
+        UHD_MSG(status) << "Setting references to the internal GPSDO" << std::endl;
+        _tree->access<std::string>(mb_path / "time_source" / "value").set("gpsdo");
+        _tree->access<std::string>(mb_path / "clock_source" / "value").set("gpsdo");
+        UHD_MSG(status) << "Initializing time to the internal GPSDO" << std::endl;
+        const time_t tp = time_t(_gps->get_sensor("gps_time").to_int()+1);
+        _tree->access<time_spec_t>(mb_path / "time" / "pps").set(time_spec_t(tp));
+    } else {
+        //init to internal clock and time source
+        _tree->access<std::string>(mb_path / "clock_source/value").set("internal");
+        _tree->access<std::string>(mb_path / "time_source/value").set("internal");
+    }
+#endif
     // Set the DSP chains to some safe value
     for (size_t i = 0; i < _radio_perifs.size(); i++) {
         _radio_perifs[i].ddc->set_host_rate(default_tick_rate / ad936x_manager::DEFAULT_DECIM);
@@ -1056,6 +1071,8 @@ void b200_impl::update_clock_source(const std::string &source)
 
 void b200_impl::update_time_source(const std::string &source)
 {
+    UHD_MSG(status) << "Changing time source to: " << source << std::endl;
+
     if (_product == B205 and source == "external" and _gpio_state.ref_sel == 1)
     {
         throw uhd::value_error("external reference cannot be both a time source and a clock source");
