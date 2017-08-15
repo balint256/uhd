@@ -15,6 +15,14 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
+#if defined(_WINDOWS) || defined(_WIN32) || defined(_MSC_VER)
+	#define ALTERNATE_TIMING
+	#define DISABLE_COLOUR
+	#define DISABLE_INTERACTIVE
+#else
+	#include <stdint.h>
+#endif // _WINDOWS
+
 #include <uhd/utils/thread_priority.hpp>
 #include <uhd/convert.hpp>
 #include <uhd/utils/safe_main.hpp>
@@ -24,22 +32,33 @@
 #include <boost/thread/thread.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
+#ifdef ALTERNATE_TIMING
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/date_time/c_local_time_adjustor.hpp>
+
+#define usleep(delay) boost::this_thread::sleep(boost::posix_time::microseconds(delay))
+#endif // ALTERNATE_TIMING
 #include <iostream>
 #include <complex>
 #include <cstdlib>
 //#include <curses.h>
+#ifndef DISABLE_INTERACTIVE
 #include <termios.h>
+#endif // DISABLE_INTERACTIVE
 #include <fstream>
-#include <stdint.h>
 
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <csignal>
 #include <uhd/utils/msg.hpp>
+#include <vector>
+#include <utility>
 
 namespace po = boost::program_options;
 
 //#define HAS_RX_METADATA_OUT_OF_SEQUENCE
+
+#ifndef DISABLE_COLOUR
 
 #define COLOUR_START        "\033["
 #define COLOUR_END          "m"
@@ -58,6 +77,28 @@ namespace po = boost::program_options;
 #define COLOUR_BACK_HIGH    "10"
 #define COLOUR_BOLD         "1"
 #define COLOUR_UNDERLINE    "4"
+
+#else
+
+#define COLOUR_START        ""
+#define COLOUR_END          ""
+#define COLOUR_RESET        COLOUR_START""COLOUR_END
+#define COLOUR_BLACK        ""
+#define COLOUR_RED          ""
+#define COLOUR_GREEN        ""
+#define COLOUR_YELLOW       ""
+#define COLOUR_BLUE         ""
+#define COLOUR_MAGENTA      ""
+#define COLOUR_CYAN         ""
+#define COLOUR_WHITE        ""
+#define COLOUR_LOW          ""
+#define COLOUR_HIGH         ""
+#define COLOUR_BACK         ""
+#define COLOUR_BACK_HIGH    ""
+#define COLOUR_BOLD         ""
+#define COLOUR_UNDERLINE    ""
+
+#endif // DISABLE_COLOUR
 
 #define HEADER              "[  ] "
 #define HEADER_TX           "[" COLOUR_START COLOUR_HIGH COLOUR_RED   COLOUR_END "TX" COLOUR_RESET "] "
@@ -110,6 +151,7 @@ static msg_count_map_t msg_count_map;
 static boost::system_time start_time, last_msg_print_time;
 static double msg_print_interval = 0.0;
 
+#ifndef DISABLE_INTERACTIVE
 // Derived from: http://cc.byexamples.com/2007/04/08/non-blocking-user-input-in-loop-without-ncurses/
 static bool kbhit(size_t timeout = 0/*ms*/)
 {
@@ -145,9 +187,11 @@ static void set_nonblock(bool enable)
     //set the terminal attributes.
     tcsetattr(STDIN_FILENO, TCSANOW, &ttystate);
 }
+#endif // DISABLE_INTERACTIVE
 
 static std::string get_stringified_time(struct timeval* tv = NULL)
 {
+#ifndef ALTERNATE_TIMING
     struct timeval _tv;
     if (tv == NULL)
     {
@@ -158,10 +202,20 @@ static std::string get_stringified_time(struct timeval* tv = NULL)
     struct tm *lt = localtime(&t);
     char s[20] = { 0 };
     strftime(s, sizeof(s), "%Y/%m/%d %H:%M:%S", lt);
+#else
+	//boost::posix_time::ptime now = boost::posix_time::second_clock::/*universal_time*/local_time();
+	boost::posix_time::ptime now = boost::posix_time::microsec_clock::local_time();
+	std::stringstream ss;
+	ss << now;
+#endif // #endif // ALTERNATE_TIMING
     return
         std::string(COLOUR_START COLOUR_UNDERLINE COLOUR_END) +
+#ifndef ALTERNATE_TIMING
         std::string(s) +
         boost::str(boost::format(".%06ld") % tv->tv_usec) +
+#else
+		ss.str() +
+#endif // #endif // ALTERNATE_TIMING
         std::string(COLOUR_RESET)
     ;
 }
@@ -239,15 +293,17 @@ static void msg_handler(uhd::msg::type_t type, const std::string& msg)
         if (msg_print_interval <= 0.0)
         {
             std::stringstream ss;
-
+#ifndef DISABLE_COLOUR
             ss << COLOUR_START COLOUR_BACK;
 
             _select_msg_colour(c, ss);
 
             ss << ";" COLOUR_HIGH COLOUR_WHITE COLOUR_END;
-            ss << msg;
+#endif // DISABLE_COLOUR
+			ss << msg;
+#ifndef DISABLE_COLOUR
             ss << COLOUR_RESET;
-
+#endif // DISABLE_COLOUR
             std::cout << ss.str() << std::flush;
         }
         else
@@ -272,14 +328,17 @@ static void msg_handler(uhd::msg::type_t type, const std::string& msg)
  * Checker thread
  **********************************************************************/
 
-void check_thread(uhd::usrp::multi_usrp::sptr usrp)
+void check_thread(uhd::usrp::multi_usrp::sptr usrp, double interval)
 {
     {
         std::stringstream ss;
         ss << "(" << get_stringified_time() << ") Checker running..." << std::endl;
         std::cout << ss.str();
     }
-    
+
+	long s = (long)interval;
+	boost::int64_t ss = (boost::int64_t)(interval * 1e6) % 1000000;
+
     while (running)
     {
         uhd::sensor_value_t ref_locked = usrp->get_mboard_sensor("ref_locked");
@@ -289,7 +348,7 @@ void check_thread(uhd::usrp::multi_usrp::sptr usrp)
             std::cout << ss.str();
         }
         
-        boost::this_thread::sleep(boost::posix_time::seconds(0) + boost::posix_time::microseconds(1000 * 500)); // MAGIC
+        boost::this_thread::sleep(boost::posix_time::seconds(s) + boost::posix_time::microseconds(ss));
     }
 
     std::cout << "Checker exiting..." << std::endl;
@@ -321,9 +380,10 @@ typedef struct RxParams {
     bool ignore_bad_packets;
     bool ignore_timeout;
     bool ignore_unexpected_error;
+	std::string rx_timing_file;
 } RX_PARAMS;
 
-static uint64_t recv_samp_count_progress = 0;
+static boost::uint64_t recv_samp_count_progress = 0;
 static boost::system_time recv_samp_count_progress_update;
 static size_t rx_sleep_delay_now = 0;
 
@@ -411,11 +471,15 @@ void benchmark_rx_rate(
     if (cmd.stream_now == false)
         timeout += params.start_time_delay;
 
+	typedef std::pair<boost::int64_t, boost::uint64_t> TimingInfo;
+	std::vector<TimingInfo> timing_info;
+	bool ts_logged = false;
+
     size_t num_recv_calls = 0;
-    int64_t cur_timestamp = 0;
+	boost::int64_t cur_timestamp = 0;
 
     boost::system_time time_last_progress;
-    uint64_t samps_last_progress = 0;
+	boost::uint64_t samps_last_progress = 0;
 
     unsigned long long num_rx_samps_single_chan = 0;
 
@@ -464,8 +528,15 @@ void benchmark_rx_rate(
                     if ((num_recv_calls == 1) && (cmd.stream_now == false))
                         std::cout << HEADER_RX"(" << get_stringified_time() << ") Received first packet after delayed start with time " << boost::format("%.6f") % md.time_spec.get_real_secs() << std::endl;
 
+					if (ts_logged == false)
+					{
+						timing_info.push_back(std::make_pair(md.time_spec.to_ticks(rate), num_rx_samps_single_chan));
+
+						ts_logged = true;
+					}
+
                     if (params.check_recv_time) {
-                        int64_t timestamp = md.time_spec.to_ticks(rate);
+						boost::int64_t timestamp = md.time_spec.to_ticks(rate);
                         if ((cur_timestamp != 0) && (cur_timestamp != timestamp)) {
                             std::stringstream ss;
                             ss << HEADER_RX"(" << get_stringified_time() << ") ";
@@ -563,6 +634,7 @@ void benchmark_rx_rate(
                 case uhd::rx_metadata_t::ERROR_CODE_OVERFLOW:   // 'recv_samps' should be 0
                     last_time = md.time_spec;
                     had_an_overflow = true;
+					ts_logged = false;
 #if HAS_RX_METADATA_OUT_OF_SEQUENCE
                     // check out_of_sequence flag to see if it was a sequence error or overflow
                     if (!md.out_of_sequence)
@@ -642,6 +714,16 @@ void benchmark_rx_rate(
 
         params.capture_files.clear();
     }
+
+	if ((params.rx_timing_file.empty() == false) && (timing_info.empty() == false))
+	{
+		std::cout << HEADER_RX"Writing " << timing_info.size() << " timing points to: " << params.rx_timing_file << std::endl;
+
+		std::ofstream timing_file(params.rx_timing_file.c_str());
+
+		for (size_t n = 0; n < timing_info.size(); ++n)
+			timing_file << timing_info[n].first << "," << timing_info[n].second << std::endl;
+	}
 
     l.lock();
     rx_thread_finished = true;
@@ -729,13 +811,13 @@ void benchmark_tx_rate(
         std::cout << HEADER_TX"Generating ramp" << std::endl;
 
         pResponse = new float[total_length * 2];
-        for (int i = 0; i < (params.tx_burst_length * 2); i += 2)
+        for (size_t i = 0; i < (params.tx_burst_length * 2); i += 2)
         {
-            pResponse[i+0] = (params.tx_full_scale) * ((double)i / (double)(params.tx_burst_length * 2));
+            pResponse[i+0] = (float)((params.tx_full_scale) * ((double)i / (double)(params.tx_burst_length * 2)));
             pResponse[i+1] = 0.0f;
         }
 
-        for (int i = (params.tx_burst_length * 2); i < (total_length * 2); ++i)
+        for (size_t i = (params.tx_burst_length * 2); i < (total_length * 2); ++i)
         {
             pResponse[i] = 0.0f;
         }
@@ -791,7 +873,7 @@ void benchmark_tx_rate(
 
     boost::system_time time_last_progress;
     boost::system_time time_first_send;
-    uint64_t samps_last_progress = 0;
+	boost::uint64_t samps_last_progress = 0;
 
     std::cout << HEADER_TX"Waiting..." << std::endl;
     tx_thread_begin.notify_all();
@@ -1190,7 +1272,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     std::string time_source, clock_source;
     std::string tx_ant, rx_ant;
     std::string tx_subdev, rx_subdev;
-    std::string set_time_mode;
+    std::string set_time_mode, set_time_time;
+	double checker_thread_interval = 0.0;
 
     //setup the program options
     po::options_description desc("Allowed options");
@@ -1249,6 +1332,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("rx-sample-limit", po::value<size_t>(&rx_sample_limit)->default_value(0), "total number of samples to receive (0 implies continuous streaming)")
         ("rx-file", po::value<std::string>(&rx_file)->default_value(""), "RX capture file path")
         ("set-time", po::value<std::string>(&set_time_mode)->default_value(""), "set mode (now, next_pps, unknown_pps)")
+		("manual-time", po::value<std::string>(&set_time_time)->default_value("zero"), "manual time reference (zero, local, utc)")
+		("checker", po::value<double>(&checker_thread_interval), "checker thread interval (s)")
         //("allow-late", "allow late bursts")
         ("drop-late", "drop late bursts")
         ("still-set-rates", "still set rate on unused direction")
@@ -1270,6 +1355,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("ignore-timeout", "continue receiving after timeout")
         ("ignore-unexpected", "continue receiving after unexpected error")
         // record TX/RX times
+		("rx-timing-file", "store RX timing data")
         // Optional interruption
         // simulate u / o at random / pulses
         // exit on O / other error
@@ -1330,9 +1416,10 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     bool ignore_bad_packets = (vm.count("ignore-bad-packets") > 0);
     bool ignore_timeout = (vm.count("ignore-timeout") > 0);
     bool ignore_unexpected_error = (vm.count("ignore-unexpected") > 0);
+	bool rx_timing_file = (vm.count("rx-timing-file") > 0);
 
     boost::posix_time::time_duration interrupt_timeout_duration(boost::posix_time::seconds(long(interrupt_timeout)) + boost::posix_time::microseconds(long((interrupt_timeout - floor(interrupt_timeout))*1e6)));
-
+#ifndef DISABLE_INTERACTIVE
     if (interactive)
     {
         //WINDOW* window = initscr();
@@ -1346,7 +1433,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         //timeout(interactive_sleep);
         set_nonblock(true);
     }
-
+#endif // DISABLE_INTERACTIVE
     try
     {
         //create a usrp device
@@ -1445,21 +1532,64 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 
             if (set_time_mode.empty() == false)
             {
+				uhd::time_spec_t new_time = uhd::time_spec_t(0.0);
+
+				if ((set_time_time == "local") || (set_time_time == "utc"))
+				{
+					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
+					{
+						// FIXME: Wait for new host-second to rollover (assumes NTP-sync'd host and PPS-enabled USRP)
+					}
+
+					/*if (set_time_time == "local")
+					{
+						new_time = uhd::time_spec_t::get_system_time();
+					}
+					else
+					*/{
+						//boost::posix_time::ptime now = boost::posix_time::microsec_clock::local_time();
+						boost::posix_time::ptime now = boost::posix_time::microsec_clock::universal_time();	// Actually local once offset is calculated (?)
+
+						if (set_time_time == "utc")
+						{
+							//now = boost::posix_time::microsec_clock::universal_time();
+
+						    typedef boost::date_time::c_local_adjustor<boost::posix_time::ptime> local_adj;
+							const boost::posix_time::ptime utc_now = boost::posix_time::second_clock::universal_time();
+							const boost::posix_time::ptime local_now = local_adj::utc_to_local(utc_now);
+							boost::posix_time::time_duration utc_offset = local_now - utc_now;
+							now -= utc_offset;
+						}
+
+						static boost::posix_time::ptime time_epoch(boost::gregorian::date(1970, 1, 1));
+
+						boost::int64_t us = (now - time_epoch).total_microseconds();
+
+						new_time = uhd::time_spec_t((double)us / 1e6);	// FIXME: Option to measure RTT and account for it
+					}
+
+					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
+					{
+						new_time = uhd::time_spec_t((double)new_time.get_full_secs() + 1.0);
+					}
+				}
+
                 if (set_time_mode == "now")
                 {
-                    usrp->set_time_now(uhd::time_spec_t(0.0));
+                    usrp->set_time_now(new_time);
                     std::cout << boost::format(HEADER "Time set now") << std::endl;
                 }
                 else if (set_time_mode == "next_pps")
                 {
-                    usrp->set_time_next_pps(uhd::time_spec_t(0.0));
-                    sleep(1);
-                    std::cout << boost::format(HEADER "Time set next PPS") << std::endl;
+                    usrp->set_time_next_pps(new_time);
+                    std::cout << boost::format(HEADER "Time set next PPS (pausing to latch)") << std::endl;
+					boost::this_thread::sleep(boost::posix_time::seconds(1));
                 }
                 else if (set_time_mode == "unknown_pps")
                 {
-                    usrp->set_time_unknown_pps(uhd::time_spec_t(0.0));
-                    std::cout << boost::format(HEADER "Time set unknown PPS") << std::endl;
+                    usrp->set_time_unknown_pps(new_time);
+                    std::cout << boost::format(HEADER "Time set unknown PPS (pausing to latch)") << std::endl;
+					boost::this_thread::sleep(boost::posix_time::seconds(1));	// Guessing sleep is needed here too
                 }
                 else
                 {
@@ -1541,7 +1671,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         if (usrp->get_time_source(0) == "gpsdo")
         {
             std::cout << boost::format(HEADER "Waiting for GPSDO time to latch") << std::endl;
-            sleep(1);
+            boost::this_thread::sleep(boost::posix_time::seconds(1));
         }
 
         uhd::time_spec_t time_start = usrp->get_time_now();	// Usually DSP #0 on mboard #0
@@ -1634,7 +1764,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                                 std::cout << boost::format(HEADER_RX"Capturing all %d channels as interleaved buffers to \"%s\"") % rx_stream->get_num_channels() % rx_file << std::endl;
                         }
 
-                        rx_params.capture_files.push_back(new std::ofstream(rx_file.c_str(), std::ios::out));
+						rx_params.capture_files.push_back(new std::ofstream(rx_file.c_str(), std::ios::out | std::ios::binary));
                     }
                     else
                     {
@@ -1642,7 +1772,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                         {
                             std::cout << boost::format(HEADER_RX"Capturing channel %d to \"%s\"") % n % (boost::str(boost::format(rx_file) % n)) << std::endl;
                             std::string rx_file_name(boost::str(boost::format(rx_file) % n));
-                            rx_params.capture_files.push_back(new std::ofstream(rx_file_name.c_str(), std::ios::out));
+                            rx_params.capture_files.push_back(new std::ofstream(rx_file_name.c_str(), std::ios::out | std::ios::binary));
                         }
                     }
                 }
@@ -1670,6 +1800,11 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 rx_params.ignore_bad_packets = ignore_bad_packets;
                 rx_params.ignore_timeout = ignore_timeout;
                 rx_params.ignore_unexpected_error = ignore_unexpected_error;
+
+				if (rx_filename_has_format)
+					rx_params.rx_timing_file = boost::str(boost::format(rx_file) % 0);
+				else
+					rx_params.rx_timing_file = rx_file + ".timing";
 
                 thread_group.create_thread(boost::bind(
                     &benchmark_rx_rate,
@@ -1788,7 +1923,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
             running = true;
             std::cout << HEADER "Begin..." << std::endl;
 
-            thread_group.create_thread(boost::bind(&check_thread, usrp));
+			if (checker_thread_interval > 0)
+				thread_group.create_thread(boost::bind(&check_thread, usrp, checker_thread_interval));
 
             if (tx_channel_nums.size() > 0)
                 tx_thread_begin.wait(l_tx);
@@ -1830,7 +1966,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 do
                 {
                     // FIXME: Stop time
-
+#ifndef DISABLE_INTERACTIVE
                     if (kbhit(0))
                     {
                         char c = fgetc(stdin);
@@ -1859,7 +1995,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                                 break;
                         }
                     }
-
+#endif // DISABLE_INTERACTIVE
                     print_msgs();
                     
                     abort_event.timed_wait(l_stop, boost::posix_time::milliseconds(interactive_sleep));
@@ -2009,12 +2145,12 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 
     //finished
     std::cout << std::endl << "Done!" << std::endl;
-
+#ifndef DISABLE_INTERACTIVE
     if (interactive)
     {
         set_nonblock(false);
         //endwin();
     }
-
+#endif // DISABLE_INTERACTIVE
     return EXIT_SUCCESS;
 }
