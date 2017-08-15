@@ -15,8 +15,15 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
+#ifdef _MSC_VER // Need to DISABLE_SRPH_DONT_CHECK_SEQUENCE here with MSVC, else if sequence check code is not compiled in for the other USRPs!
+#pragma message "Disabling SRPH_DONT_CHECK_SEQUENCE for USRP1"
+#define DISABLE_SRPH_DONT_CHECK_SEQUENCE
+#endif
+
 #include "validate_subdev_spec.hpp"
+#ifndef DISABLE_SRPH_DONT_CHECK_SEQUENCE
 #define SRPH_DONT_CHECK_SEQUENCE
+#endif // DISABLE_SRPH_DONT_CHECK_SEQUENCE
 #include "../../transport/super_recv_packet_handler.hpp"
 #define SSPH_DONT_PAD_TO_ONE
 #include "../../transport/super_send_packet_handler.hpp"
