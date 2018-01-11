@@ -32,12 +32,8 @@
 #include <boost/thread/thread.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
-#ifdef ALTERNATE_TIMING
-#include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/date_time/c_local_time_adjustor.hpp>
-
-#define usleep(delay) boost::this_thread::sleep(boost::posix_time::microseconds(delay))
-#endif // ALTERNATE_TIMING
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include <iostream>
 #include <complex>
 #include <cstdlib>
@@ -509,7 +505,7 @@ void benchmark_rx_rate(
             {
                 size_t delay = rx_sleep_delay_now;
                 rx_sleep_delay_now = 0;
-                usleep(delay);
+                boost::this_thread::sleep(boost::posix_time::microseconds(delay));
             }
 
             //try {
@@ -994,7 +990,7 @@ void benchmark_tx_rate(
         {
             size_t delay = tx_sleep_delay_now;
             tx_sleep_delay_now = 0;
-            usleep(delay);
+            boost::this_thread::sleep(boost::posix_time::microseconds(delay));
         }
 
         if (params.follow_rx_timestamps)
