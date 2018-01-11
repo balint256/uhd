@@ -126,7 +126,7 @@ unsigned long long num_late_packets_msg = 0;
 unsigned long long num_send_calls = 0;
 
 static boost::condition_variable rx_thread_complete, tx_thread_complete, tx_async_thread_complete;
-static boost::condition_variable begin, abort_event, rx_thread_begin, tx_thread_begin, recv_done/*, tx_async_begin*/;
+static boost::condition_variable begin, abort_event, rx_thread_begin, tx_thread_begin, recv_done/*, tx_async_begin*/, rx_first_packet;
 static uhd::rx_metadata_t last_rx_md;
 static size_t last_rx_samps;
 static boost::mutex last_rx_md_mutex, begin_rx_mutex, begin_tx_mutex, begin_tx_async_begin, stop_mutex;
@@ -138,9 +138,17 @@ static bool stop_signal_called = false;
 
 static void sig_int_handler(int signal)
 {
+	if (signal > -1)
+	{
+		std::stringstream ss;
+		ss << HEADER "Caught signal " << signal << std::endl;
+		std::cout << ss.str();
+	}
+
     boost::mutex::scoped_lock l(stop_mutex);
     running = false;
     stop_signal_called = true;
+	rx_first_packet.notify_all(); // In case TX/RX-before-first packet is blocking on this
     abort_event.notify_all();
 }
 
@@ -381,6 +389,7 @@ typedef struct RxParams {
     bool ignore_timeout;
     bool ignore_unexpected_error;
 	std::string rx_timing_file;
+	bool custom_start_time;
 } RX_PARAMS;
 
 static boost::uint64_t recv_samp_count_progress = 0;
@@ -447,7 +456,7 @@ void benchmark_rx_rate(
     uhd::stream_cmd_t cmd((params.rx_sample_limit == 0) ? uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS : uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE); // FIXME: The other streaming modes
     cmd.num_samps = params.rx_sample_limit;
     cmd.time_spec = actual_start_time;
-    cmd.stream_now = (params.start_time_delay == 0.0);
+    cmd.stream_now = (params.start_time_delay == 0.0) && (params.custom_start_time == false);
     rx_stream->issue_stream_cmd(cmd);
 
     if (params.set_rx_freq)
@@ -468,9 +477,15 @@ void benchmark_rx_rate(
     }
 
     double timeout = params.recv_timeout;
-    if (cmd.stream_now == false)
-        timeout += params.start_time_delay;
+/*    if (cmd.stream_now == false)
+	{
+        //timeout += params.start_time_delay; // Can't use this as might have custom time
 
+		uhd::time_spec_t delay = actual_start_time - time_now;
+		if (delay.get_real_secs() > 0)
+			timeout += delay.get_real_secs();
+	}
+*/
 	typedef std::pair<boost::int64_t, boost::uint64_t> TimingInfo;
 	std::vector<TimingInfo> timing_info;
 	bool ts_logged = false;
@@ -496,6 +511,13 @@ void benchmark_rx_rate(
 
             //try {
                 size_t recv_samps = rx_stream->recv(buffs, params.samps_per_buff, md, timeout, params.one_packet_at_a_time);
+				if ((cmd.stream_now == false) && (num_recv_calls == 0) && (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT))
+				{
+					uhd::time_spec_t now = usrp->get_time_now();
+					if (now < cmd.time_spec)
+						continue;
+				}
+
                 ++num_recv_calls;
 
                 if (params.progress_interval > 0.0)
@@ -525,8 +547,19 @@ void benchmark_rx_rate(
 
                 if (recv_samps > 0)
                 {
-                    if ((num_recv_calls == 1) && (cmd.stream_now == false))
-                        std::cout << HEADER_RX"(" << get_stringified_time() << ") Received first packet after delayed start with time " << boost::format("%.6f") % md.time_spec.get_real_secs() << std::endl;
+                    if ((num_recv_calls == 1)/* && (cmd.stream_now == false)*/)	// Always notify (even without timed start) so that duration limit timeout is still started
+					{
+						if (cmd.stream_now == false)
+						{
+							std::cout << HEADER_RX"(" << get_stringified_time() << ") Received first packet after delayed start with time " << boost::format("%.6f") % md.time_spec.get_real_secs() << std::endl;
+						}
+						else
+						{
+							std::cout << HEADER_RX"(" << get_stringified_time() << ") Received first packet with time " << boost::format("%.6f") % md.time_spec.get_real_secs() << std::endl;
+						}
+
+						rx_first_packet.notify_all();
+					}
 
 					if (ts_logged == false)
 					{
@@ -618,7 +651,7 @@ void benchmark_rx_rate(
             //}
 
             //handle the error codes
-            switch(md.error_code)
+            switch (md.error_code)
             {
                 case uhd::rx_metadata_t::ERROR_CODE_NONE:
                 {
@@ -692,11 +725,15 @@ void benchmark_rx_rate(
     }
     catch (const std::runtime_error& e)
     {
-        std::cout << HEADER_RX"Caught exception:" <<  e.what() << std::endl;
+        std::cout << HEADER_RX"Caught exception: " <<  e.what() << std::endl;
+
+		sig_int_handler(-1);
     }
     catch (...)
     {
         std::cout << HEADER_RX"Caught unhandled exception" << std::endl;
+
+		sig_int_handler(-1);
     }
 
     if (params.rx_sample_limit == 0)
@@ -1274,6 +1311,11 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     std::string tx_subdev, rx_subdev;
     std::string set_time_mode, set_time_time;
 	double checker_thread_interval = 0.0;
+	unsigned long long rx_start_ticks = -1;
+	size_t rx_start_seconds = -1;
+	std::string rx_start_time_str, rx_start_time_str_format;
+	size_t rtt_samples = 0;
+	std::string rx_tune_args;
 
     //setup the program options
     po::options_description desc("Allowed options");
@@ -1331,9 +1373,15 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("rx-sleep-delay", po::value<size_t>(&rx_sleep_delay)->default_value(1000), "RX sleep delay (us)")
         ("rx-sample-limit", po::value<size_t>(&rx_sample_limit)->default_value(0), "total number of samples to receive (0 implies continuous streaming)")
         ("rx-file", po::value<std::string>(&rx_file)->default_value(""), "RX capture file path")
-        ("set-time", po::value<std::string>(&set_time_mode)->default_value(""), "set mode (now, next_pps, unknown_pps)")
-		("manual-time", po::value<std::string>(&set_time_time)->default_value("zero"), "manual time reference (zero, local, utc)")
 		("checker", po::value<double>(&checker_thread_interval), "checker thread interval (s)")
+        ("set-time", po::value<std::string>(&set_time_mode)->default_value(""), "set mode (now, next_pps, unknown_pps)")
+		("manual-time", po::value<std::string>(&set_time_time)->default_value("zero"), "manual time reference (zero, local, utc, gpsdo)")
+		("rx-start-ticks", po::value<unsigned long long>(&rx_start_ticks), "absolute RX start time (ticks)")
+		("rx-start-secs", po::value<size_t>(&rx_start_seconds), "absolute RX start time (seconds)")
+		("rx-start-time", po::value<std::string>(&rx_start_time_str), "absolute RX start time (date/time string)")
+		("rx-start-time-format", po::value<std::string>(&rx_start_time_str_format)->default_value("%Y-%m-%d %H:%M:%S"), "absolute RX start time format")
+		("rtt-samples", po::value<size_t>(&rtt_samples), "how many times to average RTT for more accurate timing")
+		("rx-tune-args", po::value<std::string>(&rx_tune_args), "RX tune arguments (e.g. mode_n=integer")
         //("allow-late", "allow late bursts")
         ("drop-late", "drop late bursts")
         ("still-set-rates", "still set rate on unused direction")
@@ -1354,15 +1402,13 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("ignore-bad-packets", "continue receiving after a bad packet")
         ("ignore-timeout", "continue receiving after timeout")
         ("ignore-unexpected", "continue receiving after unexpected error")
-        // record TX/RX times
+        // record TX times?
 		("rx-timing-file", "store RX timing data")
         // Optional interruption
         // simulate u / o at random / pulses
         // exit on O / other error
         // suppress msgs
         // recv/send jitter
-        // capture each channel to separate files (if format string is spec'd)
-        // check sensors
     ;
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -1419,6 +1465,43 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 	bool rx_timing_file = (vm.count("rx-timing-file") > 0);
 
     boost::posix_time::time_duration interrupt_timeout_duration(boost::posix_time::seconds(long(interrupt_timeout)) + boost::posix_time::microseconds(long((interrupt_timeout - floor(interrupt_timeout))*1e6)));
+
+    typedef boost::date_time::c_local_adjustor<boost::posix_time::ptime> local_adj;
+	const boost::posix_time::ptime utc_now = boost::posix_time::second_clock::universal_time();
+	const boost::posix_time::ptime local_now = local_adj::utc_to_local(utc_now);
+	const boost::posix_time::time_duration utc_offset = local_now - utc_now;
+
+	boost::posix_time::ptime time_epoch_utc(boost::gregorian::date(1970, 1, 1));
+	boost::posix_time::ptime time_epoch(boost::gregorian::date(1970, 1, 1));
+	time_epoch += utc_offset;
+
+	if (rx_start_time_str.empty() == false)
+	{
+		if (rx_start_time_str_format.empty())
+		{
+			std::cerr << HEADER_WARN"Empty RX start time format" << std::endl;
+			return ~0;
+		}
+
+		std::locale format = std::locale(std::locale::classic(), new boost::posix_time::time_input_facet(rx_start_time_str_format));
+
+		std::istringstream is(rx_start_time_str);
+		is.imbue(format);
+		boost::posix_time::ptime pt;
+		is >> pt;
+		if (pt == boost::posix_time::ptime())
+		{
+			std::cerr << HEADER_ERROR"Could not convert RX start time: " << rx_start_time_str << std::endl;
+			return ~0;
+		}
+
+		boost::posix_time::time_duration diff = pt - time_epoch;
+
+		rx_start_seconds = diff.total_seconds();
+
+		std::cout << HEADER_RX "RX start time: " << rx_start_seconds << " s" << std::endl;
+	}
+
 #ifndef DISABLE_INTERACTIVE
     if (interactive)
     {
@@ -1436,7 +1519,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 #endif // DISABLE_INTERACTIVE
     try
     {
-        //create a usrp device
+        // create a usrp device
         uhd::device_addrs_t device_addrs = uhd::device::find(args);
         if (not device_addrs.empty() and device_addrs.at(0).get("type", "") == "usrp1"){
             std::cerr << HEADER_WARN"Benchmark results will be inaccurate on USRP1 due to insufficient hardware features.\n" << std::endl;
@@ -1513,7 +1596,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
             usrp->set_clock_source("mimo", 0);  // FIXME: Check this (that it's specific to mboard 0)
             usrp->set_time_source("mimo", 0);
 
-            std::cout << HEADER "Sleeping after setting clock & time sources" << std::endl;
+            std::cout << HEADER "Sleeping after setting clock & time sources..." << std::endl;
             boost::this_thread::sleep(boost::posix_time::seconds(1));   // MAGIC
         }
         else
@@ -1529,74 +1612,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 usrp->set_time_source(time_source);
                 std::cout << boost::format(HEADER "Time source set to: %s") % time_source << std::endl;
             }
+		}
 
-            if (set_time_mode.empty() == false)
-            {
-				uhd::time_spec_t new_time = uhd::time_spec_t(0.0);
-
-				if ((set_time_time == "local") || (set_time_time == "utc"))
-				{
-					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
-					{
-						// FIXME: Wait for new host-second to rollover (assumes NTP-sync'd host and PPS-enabled USRP)
-					}
-
-					/*if (set_time_time == "local")
-					{
-						new_time = uhd::time_spec_t::get_system_time();
-					}
-					else
-					*/{
-						//boost::posix_time::ptime now = boost::posix_time::microsec_clock::local_time();
-						boost::posix_time::ptime now = boost::posix_time::microsec_clock::universal_time();	// Actually local once offset is calculated (?)
-
-						if (set_time_time == "utc")
-						{
-							//now = boost::posix_time::microsec_clock::universal_time();
-
-						    typedef boost::date_time::c_local_adjustor<boost::posix_time::ptime> local_adj;
-							const boost::posix_time::ptime utc_now = boost::posix_time::second_clock::universal_time();
-							const boost::posix_time::ptime local_now = local_adj::utc_to_local(utc_now);
-							boost::posix_time::time_duration utc_offset = local_now - utc_now;
-							now -= utc_offset;
-						}
-
-						static boost::posix_time::ptime time_epoch(boost::gregorian::date(1970, 1, 1));
-
-						boost::int64_t us = (now - time_epoch).total_microseconds();
-
-						new_time = uhd::time_spec_t((double)us / 1e6);	// FIXME: Option to measure RTT and account for it
-					}
-
-					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
-					{
-						new_time = uhd::time_spec_t((double)new_time.get_full_secs() + 1.0);
-					}
-				}
-
-                if (set_time_mode == "now")
-                {
-                    usrp->set_time_now(new_time);
-                    std::cout << boost::format(HEADER "Time set now") << std::endl;
-                }
-                else if (set_time_mode == "next_pps")
-                {
-                    usrp->set_time_next_pps(new_time);
-                    std::cout << boost::format(HEADER "Time set next PPS (pausing to latch)") << std::endl;
-					boost::this_thread::sleep(boost::posix_time::seconds(1));
-                }
-                else if (set_time_mode == "unknown_pps")
-                {
-                    usrp->set_time_unknown_pps(new_time);
-                    std::cout << boost::format(HEADER "Time set unknown PPS (pausing to latch)") << std::endl;
-					boost::this_thread::sleep(boost::posix_time::seconds(1));	// Guessing sleep is needed here too
-                }
-                else
-                {
-                    std::cout << HEADER_WARN"Cannot set time with unknown mode: " << set_time_mode << std::endl;
-                }
-            }
-        }
+		// Must set rates *before* change time as master clock rate might change dynamically with requested RX/TX rate e.g. B2x0
 
         if ((rx_channel_nums.size() > 0) || (still_set_rates))
         {
@@ -1668,24 +1686,176 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
             }
         }
 
-        if (usrp->get_time_source(0) == "gpsdo")
+		bool expect_valid_time_date = false;
+
+		if (mode != "mimo")
+		{
+            if (set_time_mode.empty() == false)
+            {
+				uhd::time_spec_t new_time = uhd::time_spec_t(0.0);
+
+				if ((set_time_time == "local") || (set_time_time == "utc"))
+				{
+					expect_valid_time_date = true;
+
+					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
+					{
+						// Wait for new host-second to rollover (assumes NTP-sync'd host and PPS-enabled USRP)
+
+						bool notified = false;
+
+						while (true)
+						{
+							boost::posix_time::ptime now = boost::posix_time::microsec_clock::local_time();
+							boost::posix_time::time_duration duration(now.time_of_day());
+							//std::cout << duration.total_milliseconds() << std::endl;
+							if ((duration.total_milliseconds() % 1000) < 500)	// MAGIC: Upper limit on RTT
+								break;
+
+							if (notified == false)
+							{
+								std::cout << boost::format(HEADER "Waiting for host clock to roll over to next second...") << std::endl;
+
+								notified = true;
+							}
+						}
+					}
+
+					//boost::int64_t us_adj = 0;
+					double us_adj_f = 0;
+
+					if (rtt_samples > 0)
+					{
+						boost::posix_time::ptime start = boost::posix_time::microsec_clock::local_time();
+
+						for (size_t n = 0; n < rtt_samples; ++n)
+						{
+							usrp->set_time_now(new_time);
+						}
+
+						boost::posix_time::ptime stop = boost::posix_time::microsec_clock::local_time();
+
+						boost::posix_time::time_duration diff = stop - start;
+
+						double ave_rtt = (double)diff.total_microseconds() / (double)rtt_samples;
+
+						us_adj_f = ave_rtt;
+						//us_adj = ((size_t)ave_rtt);
+
+						std::cout << boost::format(HEADER "Ave RTT: %f us") % ave_rtt << std::endl;
+					}
+
+					/*if (set_time_time == "local")
+					{
+						new_time = uhd::time_spec_t::get_system_time();	// Not what we want here
+					}
+					else
+					*/{
+						boost::posix_time::ptime now = boost::posix_time::microsec_clock::local_time();
+
+						if (set_time_time == "utc")
+						{
+							// Either will work
+							//now -= utc_offset;
+							now = boost::posix_time::microsec_clock::universal_time();
+						}
+
+						boost::int64_t us = (now - time_epoch).total_microseconds();
+
+						//us += us_adj;
+						double new_time_f = ((double)(us) + us_adj_f) / 1e6;
+
+						new_time = uhd::time_spec_t(new_time_f);	// FIXME: Option to measure RTT and account for it
+					}
+
+					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
+					{
+						new_time = uhd::time_spec_t(new_time.get_full_secs() + 1);
+					}
+				}
+				else if (set_time_time == "gpsdo")
+				{
+					uhd::sensor_value_t gps_time = usrp->get_mboard_sensor("gps_time");
+
+					signed _gps_time = gps_time.to_int();
+
+					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
+						_gps_time += 1;
+
+					new_time = uhd::time_spec_t((time_t)_gps_time);
+				}
+
+				std::cout << HEADER "Setting time to: " << new_time.get_full_secs() << boost::str(boost::format("%f") % new_time.get_frac_secs()).substr(1) << " s" << std::endl;
+
+                if (set_time_mode == "now")
+                {
+                    usrp->set_time_now(new_time);
+                    std::cout << boost::format(HEADER "Time set now") << std::endl;
+                }
+                else if (set_time_mode == "next_pps")
+                {
+                    usrp->set_time_next_pps(new_time);
+                    std::cout << boost::format(HEADER "Time set next PPS (pausing to latch...)") << std::endl;
+					boost::this_thread::sleep(boost::posix_time::seconds(1));
+                }
+                else if (set_time_mode == "unknown_pps")
+                {
+                    usrp->set_time_unknown_pps(new_time);
+                    std::cout << boost::format(HEADER "Time set unknown PPS (pausing to latch...)") << std::endl;
+					boost::this_thread::sleep(boost::posix_time::seconds(1));	// Guessing sleep is needed here too
+                }
+                else
+                {
+                    std::cout << HEADER_WARN"Cannot set time with unknown mode: " << set_time_mode << std::endl;
+                }
+
+				if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
+				{
+					uhd::time_spec_t time_last_pps = usrp->get_time_last_pps();
+
+					if (((set_time_mode == "next_pps") && (time_last_pps != new_time)) ||
+						((set_time_mode == "unknown_pps") && (time_last_pps != (new_time + uhd::time_spec_t((time_t)1)))))	// Need extra second as we have a 1 sec sleep above
+					{
+						uhd::time_spec_t now = usrp->get_time_now();
+
+						std::cout << HEADER_ERROR"Time did not latch: last PPS: " << time_last_pps.get_full_secs() << boost::str(boost::format("%f") % time_last_pps.get_frac_secs()).substr(1) \
+							<< ", now: " << now.get_full_secs() << boost::str(boost::format("%f") % now.get_frac_secs()).substr(1) \
+							<< ", new time: " << new_time.get_full_secs() << boost::str(boost::format("%f") % new_time.get_frac_secs()).substr(1) \
+							<< std::endl;
+
+						return ~0;
+					}
+				}
+            }
+        }
+
+        if (usrp->get_time_source(0) == "gpsdo")	// For original UHD behaviour that set time from GPSDO by default
         {
-            std::cout << boost::format(HEADER "Waiting for GPSDO time to latch") << std::endl;
+			expect_valid_time_date = true;
+
+            std::cout << boost::format(HEADER "Waiting for GPSDO time to latch...") << std::endl;
             boost::this_thread::sleep(boost::posix_time::seconds(1));
         }
 
         uhd::time_spec_t time_start = usrp->get_time_now();	// Usually DSP #0 on mboard #0
 
-        std::cout << boost::format(HEADER "Time now:  %f seconds (%llu ticks)") % time_start.get_real_secs() % time_start.to_ticks(usrp->get_master_clock_rate()) << std::endl;
+        std::cout << boost::format(HEADER "Time now: %f seconds (%llu ticks)") % time_start.get_real_secs() % time_start.to_ticks(usrp->get_master_clock_rate()) << std::endl;
+
+		if (expect_valid_time_date)
+		{
+			boost::posix_time::time_duration diff = boost::posix_time::seconds(time_start.get_full_secs()) + boost::posix_time::microseconds(time_start.get_frac_secs() * 1e6);
+			boost::posix_time::ptime ptime_start = time_epoch + diff;
+			std::cout << HEADER "Time now: " << ptime_start << std::endl;
+		}
 
         boost::thread_group thread_group;
+
+		TX_PARAMS tx_params;
+        RX_PARAMS rx_params;
 
         {
             boost::mutex::scoped_lock l_tx(begin_tx_mutex);
             boost::mutex::scoped_lock l_rx(begin_rx_mutex);
-
-            TX_PARAMS tx_params;
-            RX_PARAMS rx_params;
 
             if (rx_channel_nums.size() > 0)
             {
@@ -1777,13 +1947,43 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                     }
                 }
 
+				if (rx_start_seconds != -1)
+				{
+					rx_params.start_time = uhd::time_spec_t((time_t)rx_start_seconds);
+					rx_params.custom_start_time = true;
+				}
+				else if (rx_start_ticks != -1)
+				{
+					rx_params.start_time = uhd::time_spec_t::from_ticks(rx_start_ticks, usrp->get_rx_rate());
+					rx_params.custom_start_time = true;
+				}
+				else
+				{
+					rx_params.start_time = time_start;
+					rx_params.custom_start_time = false;
+				}
+
+				if (rx_params.custom_start_time)
+				{
+					uhd::time_spec_t diff = rx_params.start_time - time_start;
+
+					std::cout << HEADER_RX "RX requested to start in: " << diff.get_full_secs() << boost::str(boost::format("%f") % diff.get_frac_secs()).substr(1) << " s" << std::endl;
+				}
+
+				if (rx_timing_file)
+				{
+					if (rx_filename_has_format)
+						rx_params.rx_timing_file = boost::str(boost::format(rx_file) % 0) + ".timing";
+					else
+						rx_params.rx_timing_file = rx_file + ".timing";
+				}
+
                 std::cout << boost::format(
                     HEADER_RX"Testing receive rate %f Msps on %u channels: %s"
                 ) % (usrp->get_rx_rate()/1e6) % rx_stream->get_num_channels() % rx_channel_list << std::endl;
 
                 rx_params.samps_per_packet = samps_per_packet;
                 rx_params.samps_per_buff = samps_per_buff;
-                rx_params.start_time = time_start;
                 rx_params.start_time_delay = recv_start_delay;
                 rx_params.recv_timeout = recv_timeout;
                 rx_params.one_packet_at_a_time = recv_single_packets;
@@ -1800,11 +2000,6 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 rx_params.ignore_bad_packets = ignore_bad_packets;
                 rx_params.ignore_timeout = ignore_timeout;
                 rx_params.ignore_unexpected_error = ignore_unexpected_error;
-
-				if (rx_filename_has_format)
-					rx_params.rx_timing_file = boost::str(boost::format(rx_file) % 0);
-				else
-					rx_params.rx_timing_file = rx_file + ".timing";
 
                 thread_group.create_thread(boost::bind(
                     &benchmark_rx_rate,
@@ -2003,14 +2198,28 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
             }
             else if (duration > 0)
             {
-                //sleep for the required duration
-                std::cout << boost::format(HEADER "Main thread sleeping for: %f seconds (host wall clock)") % duration << std::endl;
-                std::cout << HEADER "Waiting for CTRL+C to finish early..." << std::endl;
-                const long secs = long(duration);
-                const long usecs = long((duration - secs)*1e6);
+				//if ((rx_params.start_time_delay > 0) || (rx_params.custom_start_time))
+				if (rx_channel_nums.empty() == false)
+				{
+					// Interruption has been disabled in RX thread, so not possible to interrupt blocking 'recv'
 
-                abort_event.timed_wait(l_stop, boost::posix_time::seconds(secs) + boost::posix_time::microseconds(usecs));
-                //boost::this_thread::sleep(boost::posix_time::seconds(secs) + boost::posix_time::microseconds(usecs));
+					std::cout << HEADER "Main thread waiting for first RX packet..." << std::endl;
+
+					//boost::mutex::scoped_lock stop_lock(last_rx_md_mutex)?
+					rx_first_packet.wait(l_stop);
+				}
+
+				if (running)
+				{
+					//sleep for the required duration
+					std::cout << boost::format(HEADER "Main thread sleeping for: %f seconds (host wall clock)") % duration << std::endl;
+					std::cout << HEADER "Waiting for CTRL+C to finish early..." << std::endl;
+					const long secs = long(duration);
+					const long usecs = long((duration - secs)*1e6);
+
+					abort_event.timed_wait(l_stop, boost::posix_time::seconds(secs) + boost::posix_time::microseconds(usecs));
+					//boost::this_thread::sleep(boost::posix_time::seconds(secs) + boost::posix_time::microseconds(usecs));
+				}
             }
             else
             {
