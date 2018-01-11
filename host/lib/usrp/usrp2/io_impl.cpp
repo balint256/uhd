@@ -468,6 +468,9 @@ rx_streamer::sptr usrp2_impl::get_rx_stream(const uhd::stream_args_t &args_){
                 my_streamer->set_xport_chan_get_buff(chan_i, boost::bind(
                     &zero_copy_if::get_recv_buff, _mbc[mb].rx_dsp_xports[dsp], _1
                 ), true /*flush*/);
+                my_streamer->set_overflow_handler(chan_i, boost::bind(
+                    &rx_dsp_core_200::handle_overflow, _mbc[mb].rx_dsps[dsp]
+                ));
                 my_streamer->set_issue_stream_cmd(chan_i, boost::bind(
                     &rx_dsp_core_200::issue_stream_command, _mbc[mb].rx_dsps[dsp], _1));
                 _mbc[mb].rx_streamers[dsp] = my_streamer; //store weak pointer
