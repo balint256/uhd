@@ -313,7 +313,8 @@ typedef struct RxParams {
     size_t rx_sample_limit;
     std::vector<std::ofstream*> capture_files;
     bool set_rx_freq;
-    double rx_freq;
+    //double rx_freq;
+    std::vector<double> rx_freq;
     double rx_freq_delay;
     double rx_lo_offset;
     bool interleave_rx_file_samples;
@@ -356,11 +357,12 @@ void benchmark_rx_rate(
     {
         if (params.rx_freq_delay == 0)
         {
-            std::cout << boost::format(HEADER_RX"Setting RX freq: %f (LO offset: %f Hz)") % params.rx_freq % params.rx_lo_offset << std::endl;
-
-            uhd::tune_request_t tune_request = uhd::tune_request_t(params.rx_freq, params.rx_lo_offset);
             for (size_t ch = 0; ch < rx_stream->get_num_channels(); ch++)
+            {
+                std::cout << boost::format(HEADER_RX"Setting RX freq on channel %d: %f (LO offset: %f Hz)") % ch % params.rx_freq[ch] % params.rx_lo_offset << std::endl;
+                uhd::tune_request_t tune_request = uhd::tune_request_t(params.rx_freq[ch], params.rx_lo_offset);
                 usrp->set_rx_freq(tune_request, ch);
+            }
         }
     }
 
@@ -394,14 +396,15 @@ void benchmark_rx_rate(
     {
         if (params.rx_freq_delay > 0)
         {
-            std::cout << boost::format(HEADER_RX"Scheduling RX freq in %d seconds: %f (LO offset: %f Hz)") % params.rx_freq_delay % params.rx_freq % params.rx_lo_offset << std::endl;
-
             uhd::time_spec_t tune_time = params.start_time + uhd::time_spec_t(params.rx_freq_delay);
             usrp->set_command_time(tune_time);
 
-            uhd::tune_request_t tune_request = uhd::tune_request_t(params.rx_freq, params.rx_lo_offset);
             for (size_t ch = 0; ch < rx_stream->get_num_channels(); ch++)
+            {
+                std::cout << boost::format(HEADER_RX"Scheduling RX freq in %d seconds on channel %d: %f (LO offset: %f Hz)") % params.rx_freq_delay % ch % params.rx_freq[ch] % params.rx_lo_offset << std::endl;
+                uhd::tune_request_t tune_request = uhd::tune_request_t(params.rx_freq[ch], params.rx_lo_offset);
                 usrp->set_rx_freq(tune_request, ch);
+            }
 
             usrp->clear_command_time();
         }
@@ -1140,7 +1143,7 @@ std::vector<size_t> get_channels(const std::string& channel_list, size_t max = -
             throw std::runtime_error("Invalid channel(s) specified.");
         }
         else {
-            channel_nums.push_back(boost::lexical_cast<int>(channel_strings[ch]));
+            channel_nums.push_back(chan);
         }
     }
 
@@ -1178,10 +1181,13 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     size_t interactive_sleep;
     double tx_full_scale;
     double tx_freq = 0, tx_freq_init = 0;
-    double rx_freq = 0, rx_freq_init = 0;
+    // std::string tx_freq, tx_freq_init;
+//    double rx_freq = 0, rx_freq_init = 0;
+    std::string rx_freq, rx_freq_init;
     double rx_lo_offset, tx_lo_offset;
     double tx_freq_delay = 0, rx_freq_delay = 0;
-    double tx_gain = 0, rx_gain = 0;
+    double tx_gain = 0;
+    std::string rx_gain;
     double tx_time_between_bursts;
     size_t tx_sleep_delay;
     size_t rx_sleep_delay;
@@ -1233,15 +1239,21 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("interactive-sleep", po::value<size_t>(&interactive_sleep)->default_value(10), "interactive sleep period (ms)")
         ("tx-full-scale", po::value<double>(&tx_full_scale)->default_value(0.7), "full-scale TX sample value")
         ("tx-freq", po::value<double>(&tx_freq), "TX frequency (Hz)")
+        // ("tx-freq", po::value<std::string>(&tx_freq), "TX frequency (Hz)")
         ("tx-lo-offset", po::value<double>(&tx_lo_offset)->default_value(0.0), "TX LO offset (Hz)")
         ("tx-freq-init", po::value<double>(&tx_freq_init), "initial TX frequency before realising main TX frequency (Hz)")
+        // ("tx-freq-init", po::value<std::string>(&tx_freq_init), "initial TX frequency before realising main TX frequency (Hz)")
         ("tx-freq-delay", po::value<double>(&tx_freq_delay), "seconds after which to set main TX frequency (Hz)")
-        ("rx-freq", po::value<double>(&rx_freq), "RX frequency (Hz)")
+//        ("rx-freq", po::value<double>(&rx_freq), "RX frequency (Hz)")
+        ("rx-freq", po::value<std::string>(&rx_freq), "RX frequency (Hz)")
         ("rx-lo-offset", po::value<double>(&rx_lo_offset)->default_value(0.0), "RX LO offset (Hz)")
-        ("rx-freq-init", po::value<double>(&rx_freq_init), "initial RX frequency before realising main RX frequency (Hz)")
+//        ("rx-freq-init", po::value<double>(&rx_freq_init), "initial RX frequency before realising main RX frequency (Hz)")
+        ("rx-freq-init", po::value<std::string>(&rx_freq_init), "initial RX frequency before realising main RX frequency (Hz)")
         ("rx-freq-delay", po::value<double>(&rx_freq_delay), "seconds after which to set main RX frequency (Hz)")
-        ("tx-gain", po::value<double>(&tx_gain), "TX gain (Hz)")
-        ("rx-gain", po::value<double>(&rx_gain), "RX gain (Hz)")
+        ("tx-gain", po::value<double>(&tx_gain), "TX gain (dB)")
+        // ("tx-gain", po::value<std::string>(&tx_gain), "TX gain (dB)")
+//        ("rx-gain", po::value<double>(&rx_gain), "RX gain (dB)")
+        ("rx-gain", po::value<std::string>(&rx_gain), "RX gain (dB)")
         ("tx-ant", po::value<std::string>(&tx_ant), "TX antenna")
         ("rx-ant", po::value<std::string>(&rx_ant), "RX antenna")
         ("tx-sleep-delay", po::value<size_t>(&tx_sleep_delay)->default_value(1000), "TX sleep delay (us)")
@@ -1487,19 +1499,49 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                     usrp->set_rx_antenna(rx_ant, ch);
             }
 
-            if (vm.count("rx-freq-init") > 0)
+            // if (vm.count("rx-freq-init") > 0)
+            if (rx_freq_init.empty() == false)
             {
-                std::cout << boost::format(HEADER_RX"Setting initial RX freq: %f (LO offset: %f Hz)") % rx_freq_init % rx_lo_offset << std::endl;
-                uhd::tune_request_t tune_request = uhd::tune_request_t(rx_freq_init, rx_lo_offset);
+                std::vector<std::string> freq_strings;
+
+                boost::split(freq_strings, rx_freq_init, boost::is_any_of("\"',"));
+
+                if (freq_strings.size() > rx_channel_nums.size())
+                {
+                    //
+                }
+
+                double last_freq = 0.0;
                 for (size_t ch = 0; ch < rx_channel_nums.size(); ch++)
+                {
+                    if (ch < freq_strings.size())
+                        last_freq = boost::lexical_cast<double>(freq_strings[ch]);
+                    std::cout << boost::format(HEADER_RX"Setting initial RX freq on channel %d: %f (LO offset: %f Hz)") % ch % last_freq % rx_lo_offset << std::endl;
+                    uhd::tune_request_t tune_request = uhd::tune_request_t(last_freq, rx_lo_offset);
                     usrp->set_rx_freq(tune_request, ch);
+                }
             }
 
-            if (vm.count("rx-gain") > 0)
+            //if (vm.count("rx-gain") > 0)
+            if (rx_gain.empty() == false)
             {
-                std::cout << boost::format(HEADER_RX"Setting RX gain: %f") % rx_gain << std::endl;
+                std::vector<std::string> gain_strings;
+
+                boost::split(gain_strings, rx_gain, boost::is_any_of("\"',"));
+
+                if (gain_strings.size() > rx_channel_nums.size())
+                {
+                    //
+                }
+
+                double last_gain = 0;
                 for (size_t ch = 0; ch < rx_channel_nums.size(); ch++)
-                    usrp->set_rx_gain(rx_gain, ch);
+                {
+                    if (ch < gain_strings.size())
+                        last_gain = boost::lexical_cast<double>(gain_strings[ch]);
+                    std::cout << boost::format(HEADER_RX"Setting RX gain on channel %d: %f") % ch % last_gain << std::endl;
+                    usrp->set_rx_gain(last_gain, ch);
+                }
             }
         }
 
@@ -1634,7 +1676,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                                 std::cout << boost::format(HEADER_RX"Capturing all %d channels as interleaved buffers to \"%s\"") % rx_stream->get_num_channels() % rx_file << std::endl;
                         }
 
-                        rx_params.capture_files.push_back(new std::ofstream(rx_file.c_str(), std::ios::out));
+                        rx_params.capture_files.push_back(new std::ofstream(rx_file.c_str(), std::ios::out | std::ios::trunc));
                     }
                     else
                     {
@@ -1642,9 +1684,35 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                         {
                             std::cout << boost::format(HEADER_RX"Capturing channel %d to \"%s\"") % n % (boost::str(boost::format(rx_file) % n)) << std::endl;
                             std::string rx_file_name(boost::str(boost::format(rx_file) % n));
-                            rx_params.capture_files.push_back(new std::ofstream(rx_file_name.c_str(), std::ios::out));
+                            rx_params.capture_files.push_back(new std::ofstream(rx_file_name.c_str(), std::ios::out | std::ios::trunc));
                         }
                     }
+                }
+
+                std::vector<std::string> freq_strings;
+
+                boost::split(freq_strings, rx_freq, boost::is_any_of("\"',"));
+
+                if (freq_strings.size() > rx_channel_nums.size())
+                {
+                    //
+                }
+
+                double last_freq = 0.0;
+                for (size_t ch = 0; ch < rx_channel_nums.size(); ch++)
+                {
+                    if (ch < freq_strings.size())
+                    {
+                        try
+                        {
+                            last_freq = boost::lexical_cast<double>(freq_strings[ch]);
+                        }
+                        catch (...)
+                        {
+                            // FIXME
+                        }
+                    }
+                    rx_params.rx_freq.push_back(last_freq);
                 }
 
                 std::cout << boost::format(
@@ -1662,7 +1730,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 rx_params.size_map = rx_size_map;
                 rx_params.rx_sample_limit = rx_sample_limit;
                 rx_params.set_rx_freq = (vm.count("rx-freq") > 0);
-                rx_params.rx_freq = rx_freq;
+                // rx_params.rx_freq = rx_freq;
                 rx_params.rx_freq_delay = rx_freq_delay;
                 rx_params.rx_lo_offset = rx_lo_offset;
                 rx_params.interleave_rx_file_samples = interleave_rx_file_samples;
