@@ -387,6 +387,8 @@ typedef struct RxParams {
     bool ignore_unexpected_error;
 	std::string rx_timing_file;
 	bool custom_start_time;
+    size_t rx_file_loop_size;
+    std::string rx_loop_file;
 } RX_PARAMS;
 
 static boost::uint64_t recv_samp_count_progress = 0;
@@ -496,6 +498,10 @@ void benchmark_rx_rate(
 	boost::uint64_t samps_last_progress = 0;
 
     unsigned long long num_rx_samps_single_chan = 0;
+
+    boost::uint64_t file_cursor = 0;
+    typedef std::pair<boost::uint64_t, unsigned long long> LoopInfo;
+    std::vector<LoopInfo> loop_info;
 
     //while (not boost::this_thread::interruption_requested()){
     try {
@@ -638,6 +644,17 @@ void benchmark_rx_rate(
                                 params.capture_files[n]->write((const char*)buffs[n], num_bytes);
                             }
                         }
+
+                        file_cursor += (recv_samps * bytes_per_samp);
+                        if ((params.rx_file_loop_size > 0) &&
+                            (((file_cursor == params.rx_file_loop_size) ||
+                            ((file_cursor + (params.samps_per_buff * bytes_per_samp)) > params.rx_file_loop_size))))    // This may go over! Might need to ignore samples when reading based on loop info!
+                        {
+                            loop_info.push_back(std::make_pair(file_cursor, num_rx_samps_single_chan));
+                            for (size_t n = 0; n < channel_count; ++n)
+                                params.capture_files[n]->seekp(0);
+                            file_cursor = 0;
+                        }
                     }
                 }
             //}
@@ -760,6 +777,18 @@ void benchmark_rx_rate(
 		for (size_t n = 0; n < timing_info.size(); ++n)
 			timing_file << timing_info[n].first << "," << timing_info[n].second << std::endl;
 	}
+
+    if (loop_info.empty() == false)
+    {
+        loop_info.push_back(std::make_pair(file_cursor, num_rx_samps_single_chan)); // Must add final point
+
+        std::cout << HEADER_RX"Writing " << loop_info.size() << " loop points to: " << params.rx_loop_file << std::endl;
+
+        std::ofstream loop_file(params.rx_loop_file.c_str());
+
+        for (size_t n = 0; n < loop_info.size(); ++n)
+            loop_file << loop_info[n].first << "," << loop_info[n].second << std::endl;
+    }
 
     l.lock();
     rx_thread_finished = true;
@@ -1318,6 +1347,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 	std::string rx_start_time_str, rx_start_time_str_format;
 	size_t rtt_samples = 0;
 	std::string rx_tune_args;
+    size_t rx_file_loop_size = 0;
 
     //setup the program options
     po::options_description desc("Allowed options");
@@ -1412,6 +1442,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("ignore-unexpected", "continue receiving after unexpected error")
         // record TX times?
 		("rx-timing-file", "store RX timing data")
+        ("rx-file-loop-size", po::value<size_t>(&rx_file_loop_size), "after how many bytes to loop capture file (bytes)")
         // Optional interruption
         // simulate u / o at random / pulses
         // exit on O / other error
@@ -1982,6 +2013,17 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                             std::string rx_file_name(boost::str(boost::format(rx_file) % n));
                             rx_params.capture_files.push_back(new std::ofstream(rx_file_name.c_str(), std::ios::out | std::ios::binary | std::ios::trunc));
                         }
+                    }
+
+                    if (rx_file_loop_size > 0)
+                    {
+                        std::cout << boost::format(HEADER_RX"Capture file loop size: %d bytes") % rx_file_loop_size << std::endl;
+                        rx_params.rx_file_loop_size = rx_file_loop_size;
+
+                        if (rx_filename_has_format)
+                            rx_params.rx_loop_file = boost::str(boost::format(rx_file) % 0) + ".loop";
+                        else
+                            rx_params.rx_loop_file = rx_file + ".loop";
                     }
                 }
 
