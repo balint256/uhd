@@ -1757,6 +1757,14 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 
 		bool expect_valid_time_date = false;
 
+        if (usrp->get_time_source(0) == "gpsdo")    // For original UHD behaviour that set time from GPSDO by default
+        {
+            expect_valid_time_date = true;
+
+            std::cout << boost::format(HEADER "Waiting for GPSDO time to latch...") << std::endl;
+            boost::this_thread::sleep(boost::posix_time::seconds(1));
+        }
+
 		if (mode != "mimo")
 		{
             if (set_time_mode.empty() == false)
@@ -1834,7 +1842,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 						//us += us_adj;
 						double new_time_f = ((double)(us) + us_adj_f) / 1e6;
 
-						new_time = uhd::time_spec_t(new_time_f);	// FIXME: Option to measure RTT and account for it
+						new_time = uhd::time_spec_t(new_time_f);
 					}
 
 					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
@@ -1844,6 +1852,39 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 				}
 				else if (set_time_time == "gpsdo")
 				{
+                    uhd::time_spec_t time_last_pps_first = usrp->get_time_last_pps();
+
+                    std::cout << boost::format(HEADER "Waiting for PPS (last: ") << (uint64_t)time_last_pps_first.get_real_secs() << boost::str(boost::format("%f") % (time_last_pps_first.get_real_secs() - floor(time_last_pps_first.get_real_secs()))).substr(1) << ")" << std::endl;
+
+                    boost::posix_time::ptime start = boost::posix_time::microsec_clock::local_time();
+
+                    while (true)
+                    {
+                        boost::posix_time::ptime stop = boost::posix_time::microsec_clock::local_time();
+
+                        boost::posix_time::time_duration diff = stop - start;
+
+                        if (diff.total_seconds() >= 2.0)
+                        {
+                            std::cout << HEADER_ERROR"No PPS detected!" << std::endl;
+
+                            return ~0;
+                        }
+
+                        uhd::time_spec_t time_last_pps = usrp->get_time_last_pps();
+
+                        if (time_last_pps > time_last_pps_first)
+                        {
+                            uhd::time_spec_t diff = time_last_pps - time_last_pps_first;
+
+                            std::cout << HEADER"PPS diff (ticks): " << diff.to_ticks(usrp->get_rx_rate()) << std::endl;
+
+                            std::cout << boost::format(HEADER "After PPS, time: ") << (uint64_t)time_last_pps.get_real_secs() << boost::str(boost::format("%f") % (time_last_pps.get_real_secs() - floor(time_last_pps_first.get_real_secs()))).substr(1) << std::endl;
+
+                            break;
+                        }
+                    }
+
 					uhd::sensor_value_t gps_time = usrp->get_mboard_sensor("gps_time");
 
 					signed _gps_time = gps_time.to_int();
@@ -1882,28 +1923,22 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 				{
 					uhd::time_spec_t time_last_pps = usrp->get_time_last_pps();
 
-					if (((set_time_mode == "next_pps") && (time_last_pps != new_time)) ||
-						((set_time_mode == "unknown_pps") && (time_last_pps != (new_time + uhd::time_spec_t((time_t)1)))))	// Need extra second as we have a 1 sec sleep above
+					if (((set_time_mode == "next_pps") && /*(time_last_pps != new_time)*/(new_time.to_ticks(usrp->get_rx_rate()) != time_last_pps.to_ticks(usrp->get_rx_rate()))) ||
+						((set_time_mode == "unknown_pps") && /*(time_last_pps != (new_time + uhd::time_spec_t((time_t)1)))*/(time_last_pps.to_ticks(usrp->get_rx_rate()) != (new_time + uhd::time_spec_t((time_t)1)).to_ticks(usrp->get_rx_rate()))))	// Need extra second as we have a 1 sec sleep above
 					{
 						uhd::time_spec_t now = usrp->get_time_now();
 
-						std::cout << HEADER_ERROR"Time did not latch: last PPS: " << time_last_pps.get_full_secs() << boost::str(boost::format("%f") % time_last_pps.get_frac_secs()).substr(1) \
-							<< ", now: " << now.get_full_secs() << boost::str(boost::format("%f") % now.get_frac_secs()).substr(1) \
-							<< ", new time: " << new_time.get_full_secs() << boost::str(boost::format("%f") % new_time.get_frac_secs()).substr(1) \
+						std::cout << HEADER_ERROR"Time did not latch: last PPS: " << (uint64_t)time_last_pps.get_real_secs() << boost::str(boost::format("%f") % (time_last_pps.get_real_secs() - floor(time_last_pps.get_real_secs()))).substr(1) \
+							<< ", now: " << (uint64_t)now.get_real_secs() << boost::str(boost::format("%f") % (now.get_real_secs() - floor(now.get_real_secs()))).substr(1) \
+							<< ", new time: " << (uint64_t)new_time.get_real_secs() << boost::str(boost::format("%f") % (new_time.get_real_secs() - floor(new_time.get_real_secs()))).substr(1) \
+                            << ", diff: " << (new_time - time_last_pps).get_real_secs() \
+                            << ", tick diff: " << (new_time.to_ticks(usrp->get_rx_rate()) - time_last_pps.to_ticks(usrp->get_rx_rate())) \
 							<< std::endl;
 
 						return ~0;
 					}
 				}
             }
-        }
-
-        if (usrp->get_time_source(0) == "gpsdo")	// For original UHD behaviour that set time from GPSDO by default
-        {
-			expect_valid_time_date = true;
-
-            std::cout << boost::format(HEADER "Waiting for GPSDO time to latch...") << std::endl;
-            boost::this_thread::sleep(boost::posix_time::seconds(1));
         }
 
         uhd::time_spec_t time_start = usrp->get_time_now();	// Usually DSP #0 on mboard #0
