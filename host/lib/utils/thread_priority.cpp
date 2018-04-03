@@ -20,6 +20,8 @@
 #include <uhd/exception.hpp>
 #include <boost/format.hpp>
 #include <iostream>
+#include <stdio.h>
+#include <memory.h>
 
 #if defined(macintosh) || defined(__APPLE__) || defined(__APPLE_CC__) || \
     defined(__FreeBSD__)
@@ -74,6 +76,7 @@ static void check_priority_range(float priority){
         fprintf(stderr, "Policy: %d, Min pri: %d, Max pri: %d\n", policy, min_pri, max_pri);
 
         int ret = 0;
+#if defined(macintosh) || defined(__APPLE__) || defined(__APPLE_CC__) || defined(__FreeBSD__)
         mach_msg_type_number_t count = THREAD_PRECEDENCE_POLICY_COUNT;
         boolean_t get_default = 0;
 
@@ -111,6 +114,7 @@ static void check_priority_range(float priority){
         if (ret != KERN_SUCCESS) throw uhd::os_error("Failed to get thread policy");
         fprintf(stderr, "Precedence (%i): %u\n", ret, precedence.importance);
 */
+#endif
         ///////////////////////////////
 
         //set the new priority and policy
