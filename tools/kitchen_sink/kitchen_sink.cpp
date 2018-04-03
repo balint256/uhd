@@ -778,7 +778,7 @@ void benchmark_rx_rate(
 			timing_file << timing_info[n].first << "," << timing_info[n].second << std::endl;
 	}
 
-    if (loop_info.empty() == false)
+    if ((params.rx_loop_file.empty() == false) && (loop_info.empty() == false))
     {
         loop_info.push_back(std::make_pair(file_cursor, num_rx_samps_single_chan)); // Must add final point
 
@@ -2053,7 +2053,6 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                     if (rx_file_loop_size > 0)
                     {
                         std::cout << boost::format(HEADER_RX"Capture file loop size: %d bytes") % rx_file_loop_size << std::endl;
-                        rx_params.rx_file_loop_size = rx_file_loop_size;
 
                         if (rx_filename_has_format)
                             rx_params.rx_loop_file = boost::str(boost::format(rx_file) % 0) + ".loop";
@@ -2141,6 +2140,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 rx_params.ignore_bad_packets = ignore_bad_packets;
                 rx_params.ignore_timeout = ignore_timeout;
                 rx_params.ignore_unexpected_error = ignore_unexpected_error;
+                rx_params.rx_file_loop_size = rx_file_loop_size;
 
                 thread_group.create_thread(boost::bind(
                     &benchmark_rx_rate,
