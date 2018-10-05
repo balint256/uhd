@@ -1348,6 +1348,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 	size_t rtt_samples = 0;
 	std::string rx_tune_args;
     size_t rx_file_loop_size = 0;
+    double rx_bandwidth;
+    double tx_bandwidth;
 
     //setup the program options
     po::options_description desc("Allowed options");
@@ -1420,6 +1422,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 		("rx-start-time-format", po::value<std::string>(&rx_start_time_str_format)->default_value("%Y-%m-%d %H:%M:%S"), "absolute RX start time format")
 		("rtt-samples", po::value<size_t>(&rtt_samples), "how many times to average RTT for more accurate timing")
 		("rx-tune-args", po::value<std::string>(&rx_tune_args), "RX tune arguments (e.g. mode_n=integer")
+        ("rx-bandwidth", po::value<double>(&rx_bandwidth), "RX bandwidth (Hz)")
+        ("tx-bandwidth", po::value<double>(&tx_bandwidth), "TX bandwidth (Hz)")
         //("allow-late", "allow late bursts")
         ("drop-late", "drop late bursts")
         ("still-set-rates", "still set rate on unused direction")
@@ -1462,7 +1466,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     //if (vm.count("tx-channels") == 0)
     //    tx_channel_list = channel_list;
     if ((vm.count("rx-channels") == 0) && (vm.count("tx-channels") == 0))
-        rx_channel_list = tx_channel_list = channel_list;
+        rx_channel_list = /*tx_channel_list = */channel_list; // Do NOT run TX by default
     if (vm.count("rx-progress-interval") == 0)
         rx_progress_interval = progress_interval;
     if (vm.count("tx-progress-interval") == 0)
@@ -1718,6 +1722,13 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                     usrp->set_rx_gain(last_gain, ch);
                 }
             }
+
+            if (vm.count("rx-bandwidth") > 0)
+            {
+                std::cout << boost::format(HEADER_RX"Setting RX bandwidth: %f") % rx_bandwidth << std::endl;
+                for (size_t ch = 0; ch < rx_channel_nums.size(); ch++)
+                    usrp->set_rx_bandwidth(rx_bandwidth, ch);
+            }
         }
 
         if ((tx_channel_nums.size() > 0) || (still_set_rates))
@@ -1752,6 +1763,13 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 std::cout << boost::format(HEADER_TX"Setting TX gain: %f") % tx_gain << std::endl;
                 for (size_t ch = 0; ch < tx_channel_nums.size(); ch++)
                     usrp->set_tx_gain(tx_gain, ch);
+            }
+
+            if (vm.count("tx-bandwidth") > 0)
+            {
+                std::cout << boost::format(HEADER_TX"Setting TX bandwidth: %f") % tx_bandwidth << std::endl;
+                for (size_t ch = 0; ch < tx_channel_nums.size(); ch++)
+                    usrp->set_tx_bandwidth(tx_bandwidth, ch);
             }
         }
 
