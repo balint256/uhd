@@ -454,7 +454,12 @@ class usb_device():
 
     def open(self, idVendor, idProduct, bus=None, address=None):
         print("Finding %04x:%04x..." % (idVendor, idProduct))
-        self.dev = usb.core.find(idVendor=idVendor, idProduct=idProduct, bus=bus, address=address)
+        kwds = {}
+        if bus is not None:
+            kwds['bus'] = bus
+        if address is not None:
+            kwds['address'] = address
+        self.dev = usb.core.find(idVendor=idVendor, idProduct=idProduct, **kwds)
         if self.dev is None:
             raise ValueError('Device not found: %04x:%04x' % (idVendor, idProduct))
 
