@@ -452,9 +452,9 @@ class usb_device():
         self.counters = counter_set(COUNTERS)
         self.timeout = 2000
 
-    def open(self, idVendor, idProduct):
+    def open(self, idVendor, idProduct, bus=None, address=None):
         print("Finding %04x:%04x..." % (idVendor, idProduct))
-        self.dev = usb.core.find(idVendor=idVendor, idProduct=idProduct)
+        self.dev = usb.core.find(idVendor=idVendor, idProduct=idProduct, bus=bus, address=address)
         if self.dev is None:
             raise ValueError('Device not found: %04x:%04x' % (idVendor, idProduct))
 
@@ -700,6 +700,8 @@ def main():
 
     parser.add_option("-v", "--vid", type="string", default="0x2500", help="VID [default=%default]")
     parser.add_option("-p", "--pid", type="string", default="0x0020", help="PID [default=%default]")
+    parser.add_option("--address", type="int", default=None, help="Address [default=%default]")
+    parser.add_option("--bus", type="int", default=None, help="Bus [default=%default]")
     parser.add_option("-t", "--tty", type="string", default=None, help="TTY [default=%default]")
     parser.add_option("-c", "--cmd", type="string", default="", help="Command (empty opens prompt)")
     parser.add_option("-n", "--counters", type="float", default="5.0", help="Counter print interval [default=%default]")
@@ -733,7 +735,7 @@ def main():
 
         while True:
             try:
-                dev.open(idVendor=hex_to_int(options.vid), idProduct=hex_to_int(options.pid))
+                dev.open(idVendor=hex_to_int(options.vid), idProduct=hex_to_int(options.pid), bus=options.bus, address=options.address)
 
                 raw_config = dev.vrt_get(B200_VREQ_GET_CONFIG)
                 current_config = Config(raw=raw_config)
