@@ -21,6 +21,8 @@ Tool to read log buffers from the FX3. Use to debug USB connection issues.
 Requires PyUSB 1.0.
 """
 
+from __future__ import print_function
+
 import sys
 import time
 import struct
@@ -474,7 +476,7 @@ class usb_device():
 
         #self.dev.set_configuration()    # This will throw as device is already claimed
 
-        print("Opened %04x:%04x" % (idVendor, idProduct))
+        print("Opened %04x:%04x (bus: %d, address: %d)" % (idVendor, idProduct, self.dev.bus, self.dev.address))
 
         #self.dev.ctrl_transfer(0x21,          0x09,     0,        0,        [0x02,0x02,0x00,0x00,0x00,0x00,0x00,0x00] )
         #self.dev.ctrl_transfer(bmRequestType, bRequest, wValue=0, wIndex=0, data_or_wLength = None,                   timeout = None
