@@ -1804,7 +1804,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 							boost::posix_time::ptime now = boost::posix_time::microsec_clock::local_time();
 							boost::posix_time::time_duration duration(now.time_of_day());
 							//std::cout << duration.total_milliseconds() << std::endl;
-							if ((duration.total_milliseconds() % 1000) < 500)	// MAGIC: Upper limit on RTT
+							size_t ms = duration.total_milliseconds() % 1000;
+							const size_t lockout_ms = 200; // MAGIC: Upper limit on RTT
+							if ((ms > lockout_ms) || (ms < (1000 - lockout_ms)))
 								break;
 
 							if (notified == false)
@@ -1965,7 +1967,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 
 		if (expect_valid_time_date)
 		{
-			boost::posix_time::time_duration diff = boost::posix_time::seconds(time_start.get_full_secs()) + boost::posix_time::microseconds(time_start.get_frac_secs() * 1e6);
+			boost::posix_time::time_duration diff = boost::posix_time::seconds(time_start.get_full_secs()) + boost::posix_time::microseconds((uint64_t)(time_start.get_frac_secs() * 1e6));
 			boost::posix_time::ptime ptime_start = time_epoch + diff;
 			std::cout << HEADER "Time now: " << ptime_start << std::endl;
 		}
