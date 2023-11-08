@@ -46,9 +46,16 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <csignal>
-#include <uhd/utils/msg.hpp>
 #include <vector>
 #include <utility>
+#include <uhd/version.hpp>
+
+#include <boost/preprocessor/stringize.hpp>
+#pragma message("UHD_VERSION=" BOOST_PP_STRINGIZE(UHD_VERSION))
+#if UHD_VERSION <= 30907
+#include <uhd/utils/msg.hpp>
+#define ENABLE_UHD_MSG
+#endif
 
 namespace po = boost::program_options;
 
@@ -284,7 +291,7 @@ static void print_msgs(void)
         }
     }
 }
-
+#ifdef ENABLE_UHD_MSG
 static void msg_handler(uhd::msg::type_t type, const std::string& msg)
 {
     if ((type == uhd::msg::fastpath) && (msg.size() == 1))
@@ -327,7 +334,7 @@ static void msg_handler(uhd::msg::type_t type, const std::string& msg)
     else
         std::cout << msg << std::flush;
 }
-
+#endif // ENABLE_UHD_MSG
 /***********************************************************************
  * Checker thread
  **********************************************************************/
@@ -957,6 +964,7 @@ void benchmark_tx_rate(
     l.unlock();
 
     uhd::time_spec_t last_recv_time;
+    size_t count = 0;
 
     if ((params.use_tx_timespec) || (params.send_start_delay > 0)/*Changed AND to OR, and un-commented start delay check, so 'md' TS be turned off*/) {
         if ((params.tx_rx_sync) || (params.follow_rx_timestamps)) {
@@ -1023,6 +1031,7 @@ void benchmark_tx_rate(
     bool resync_time = false;
     uhd::time_spec_t follow_time_target = md.time_spec;
     size_t last_sent = 0;
+    size_t to_send = total_length;
 
     //while (not boost::this_thread::interruption_requested()){
     while (running)
@@ -1123,8 +1132,8 @@ void benchmark_tx_rate(
                 md.end_of_burst = true;
         }
 
-        size_t nsent = tx_stream->send(buffs, total_length, md, timeout); // FIXME: Is 'total_length' always correct?
-        last_sent = nsent;
+        size_t nsent = tx_stream->send(buffs, to_send, md, timeout); // FIXME: Is 'to_send' (formerly 'total_length') always correct?
+        last_sent = 0; // Filled in below on full burst completion
         ++num_send_calls;
 
         time_now = boost::get_system_time();
@@ -1172,18 +1181,20 @@ void benchmark_tx_rate(
         }
         else
         {
-            if (nsent != total_length)
+            if (nsent != to_send)
             {
                 std::stringstream ss;
-                ss << HEADER_WARN"(" << get_stringified_time() << ") " << boost::format("Only sent %lu of %lu samples") % nsent % total_length << std::endl;
+                ss << HEADER_WARN"(" << get_stringified_time() << ") " << boost::format("[%03d] Only sent %lu of %lu samples") % count % nsent % to_send << std::endl;
                 std::cout << ss.str();
             }
+
+            to_send -= nsent;
 
             if ((params.use_relative_timestamps) && (params.use_tx_timespec) && (md.has_time_spec))
             {
                 md.time_spec += uhd::time_spec_t::from_ticks(nsent, rate);
 
-                if (params.tx_time_between_bursts)
+                if ((params.tx_time_between_bursts) && (to_send == 0))
                     md.time_spec += uhd::time_spec_t(params.tx_time_between_bursts);
             }
         }
@@ -1197,6 +1208,13 @@ void benchmark_tx_rate(
                 ss << boost::format("First send completed having sent %d samples") % nsent << std::endl;
                 std::cout << ss.str();
             }
+        }
+
+        if (to_send == 0)
+        {
+            count++;
+            to_send = total_length;
+            last_sent = total_length; // Signal that the burst has completed for the file reader
         }
 
         num_tx_samps += nsent * tx_stream->get_num_channels();
@@ -1310,7 +1328,7 @@ void benchmark_tx_rate_async_helper(
 
         //skip = true;
 
-        std::cout << "Async event code: " << async_md.event_code << std::endl;
+        //std::cout << "Async event code: " << async_md.event_code << std::endl;
 
         //handle the error codes
         switch(async_md.event_code)
@@ -1566,7 +1584,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     if (vm.count("help") or ((rx_rate + tx_rate) == 0)){
         std::cout << boost::format("UHD Kitchen Sink %s") % desc << std::endl;
         std::cout <<
-        "    By default, performs single-channel full-duplex test at 1 Msps with continuous streaming.\n"
+        "    By default, performs single-channel RX test at 1 Msps with continuous streaming.\n"
         "    Specify --channels to set RX & TX,\n"
         "        or just --rx-channels and/or --tx-channels.\n"
         "    Specify --rate to set both RX & TX.\n"
@@ -2002,7 +2020,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 					if ((set_time_mode == "next_pps") || (set_time_mode == "unknown_pps"))
 						_gps_time += 1;
 
-					new_time = uhd::time_spec_t((time_t)_gps_time);
+					new_time = uhd::time_spec_t((time_t)_gps_time, 0.0);
 				}
 
 				std::cout << HEADER "Setting time to: " << new_time.get_full_secs() << boost::str(boost::format("%f") % new_time.get_frac_secs()).substr(1) << " s" << std::endl;
@@ -2034,7 +2052,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 					uhd::time_spec_t time_last_pps = usrp->get_time_last_pps();
 
 					if (((set_time_mode == "next_pps") && /*(time_last_pps != new_time)*/(new_time.to_ticks(usrp->get_rx_rate()) != time_last_pps.to_ticks(usrp->get_rx_rate()))) ||
-						((set_time_mode == "unknown_pps") && /*(time_last_pps != (new_time + uhd::time_spec_t((time_t)1)))*/(time_last_pps.to_ticks(usrp->get_rx_rate()) != (new_time + uhd::time_spec_t((time_t)1)).to_ticks(usrp->get_rx_rate()))))	// Need extra second as we have a 1 sec sleep above
+						((set_time_mode == "unknown_pps") && /*(time_last_pps != (new_time + uhd::time_spec_t((time_t)1)))*/(time_last_pps.to_ticks(usrp->get_rx_rate()) != (new_time + uhd::time_spec_t((time_t)1, 0.0)).to_ticks(usrp->get_rx_rate()))))	// Need extra second as we have a 1 sec sleep above
 					{
 						uhd::time_spec_t now = usrp->get_time_now();
 
@@ -2199,7 +2217,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 
 				if (rx_start_seconds != -1)
 				{
-					rx_params.start_time = uhd::time_spec_t((time_t)rx_start_seconds);
+					rx_params.start_time = uhd::time_spec_t((time_t)rx_start_seconds, 0.0);
 					rx_params.custom_start_time = true;
 				}
 				else if (rx_start_ticks != -1)
@@ -2390,9 +2408,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 rx_thread_begin.wait(l_rx);
 
             std::signal(SIGINT, &sig_int_handler);
-
+#ifdef ENABLE_UHD_MSG
             uhd::msg::register_handler(&msg_handler);
-
+#endif // ENABLE_UHD_MSG
             begin.notify_all();
 
             // RTT is longer, so skip this
