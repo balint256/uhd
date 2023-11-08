@@ -128,7 +128,7 @@ static size_t last_rx_samps;
 static boost::mutex last_rx_md_mutex, begin_rx_mutex, begin_tx_mutex, begin_tx_async_begin, stop_mutex;
 static volatile bool running = false;
 static volatile boost::this_thread::disable_interruption *rx_interrupt_disabler, *tx_interrupt_disabler, *tx_async_interrupt_disabler;
-static bool rx_thread_finished = false, tx_thread_finished = false, tx_async_thread_finished = false;
+static volatile bool rx_thread_finished = false, tx_thread_finished = false, tx_async_thread_finished = false;
 
 static bool stop_signal_called = false;
 
@@ -832,6 +832,7 @@ typedef struct TxParams {
     double tx_freq;
     double tx_freq_delay;
     double tx_lo_offset;
+    std::ifstream* tx_file;
 } TX_PARAMS;
 
 void benchmark_tx_rate(
@@ -869,9 +870,19 @@ void benchmark_tx_rate(
     std::cout << boost::format(HEADER_TX"Max late packet count: %lu") % max_late_count << std::endl;
 
     std::vector<const void *> buffs;
-    std::vector<char> buff(max_samps_per_packet * uhd::convert::get_bytes_per_item(tx_cpu), 0);
+    const size_t bpi = uhd::convert::get_bytes_per_item(tx_cpu);
+    const size_t buff_len = max_samps_per_packet * bpi;
+    std::vector<char> buff(buff_len, 0);
     float* pResponse = NULL;
-    if (tx_cpu == "fc32")
+    
+    if (params.tx_file != NULL)
+    {        
+        for (size_t ch = 0; ch < tx_stream->get_num_channels(); ch++) // FIXME
+        {
+            buffs.push_back(&buff.front()); //same buffer for each channel
+        }
+    }
+    else if (tx_cpu == "fc32")
     {
         std::cout << HEADER_TX"Generating ramp" << std::endl;
 
@@ -947,7 +958,7 @@ void benchmark_tx_rate(
 
     uhd::time_spec_t last_recv_time;
 
-    if ((params.use_tx_timespec)/* && (params.send_start_delay > 0)*/) {
+    if ((params.use_tx_timespec) || (params.send_start_delay > 0)/*Changed AND to OR, and un-commented start delay check, so 'md' TS be turned off*/) {
         if ((params.tx_rx_sync) || (params.follow_rx_timestamps)) {
             boost::mutex::scoped_lock lock(last_rx_md_mutex);
             {
@@ -1011,6 +1022,7 @@ void benchmark_tx_rate(
     unsigned long long last_num_late_packets = 0;
     bool resync_time = false;
     uhd::time_spec_t follow_time_target = md.time_spec;
+    size_t last_sent = 0;
 
     //while (not boost::this_thread::interruption_requested()){
     while (running)
@@ -1054,7 +1066,65 @@ void benchmark_tx_rate(
             }
         }
 
-        size_t nsent = tx_stream->send(buffs, total_length, md, timeout);
+        bool tx_file_end = false;
+        
+        if ((params.tx_file != NULL) &&
+            ((num_send_calls == 0) || (last_sent > 0)))
+        {
+            if ((last_sent > 0) && (last_sent != (buff_len / bpi)))
+            {
+                std::stringstream ss;
+                ss << HEADER_TX"Read/send mismatch: last sent: " << last_sent << ", samples in buffer: " << (buff_len / bpi) << std::endl;
+                std::cout << ss.str();
+            }
+            
+            size_t file_read = 0;
+            while (file_read < buff_len)
+            {
+                if (file_read > 0)
+                {
+                    std::stringstream ss;
+                    ss << HEADER_TX"Already read: " << file_read << std::endl;
+                    std::cout << ss.str();
+                }
+                
+                params.tx_file->read((char*)&buff.front() + file_read, buff_len);
+                size_t _read = params.tx_file->gcount();
+                file_read += _read;
+                if (params.tx_file->eof())
+                {
+                    std::stringstream ss;
+                    ss << HEADER_TX"File EOF" << std::endl;
+                    std::cout << ss.str();
+
+                    tx_file_end = true;
+
+                    // FIXME: Optional loop
+                    //param.tx_file->seekg(0);
+
+                    break;
+                }
+                else if (_read == 0)
+                {
+                    std::stringstream ss;
+                    ss << HEADER_ERROR"Failed to read samples from TX file" << std::endl;
+                    std::cout << ss.str();
+
+                    tx_file_end = true;
+
+                    break;
+                }
+            }
+
+            if (file_read == 0)
+                break;
+
+            if (tx_file_end)
+                md.end_of_burst = true;
+        }
+
+        size_t nsent = tx_stream->send(buffs, total_length, md, timeout); // FIXME: Is 'total_length' always correct?
+        last_sent = nsent;
         ++num_send_calls;
 
         time_now = boost::get_system_time();
@@ -1132,7 +1202,14 @@ void benchmark_tx_rate(
         num_tx_samps += nsent * tx_stream->get_num_channels();
 
         if ((params.use_tx_timespec == false) && (md.has_time_spec))
+        {
             md.has_time_spec = false;
+
+            std::stringstream ss;
+            ss << HEADER_TX"(" << get_stringified_time() << ") ";
+            ss << boost::format("has_time_spec disabled") << std::endl;
+            std::cout << ss.str();
+        }
 
         if (params.recover_late)
         {
@@ -1160,6 +1237,9 @@ void benchmark_tx_rate(
         }
 
         print_msgs();
+
+        if (tx_file_end)
+            break;
     }
 
     if (params.send_final_eob)
@@ -1178,6 +1258,12 @@ void benchmark_tx_rate(
     {
         delete [] pResponse;
         pResponse = NULL;
+    }
+
+    if (params.tx_file != NULL)
+    {
+        delete params.tx_file;
+        params.tx_file = NULL;
     }
 
     l.lock();
@@ -1213,6 +1299,8 @@ void benchmark_tx_rate_async_helper(
 
     //while (not boost::this_thread::interruption_requested()){
     while (running) {
+        //std::cout << "Running: " << running << std::endl;
+        std::cout.flush();
         if (not tx_stream->recv_async_msg(async_md, (skip ? 0 : timeout)))
         {
             //std::cout << "-" << std::endl;
@@ -1220,9 +1308,9 @@ void benchmark_tx_rate_async_helper(
             continue;
         }
 
-        skip = true;
+        //skip = true;
 
-        //std::cout << "Async event code: " << async_md.event_code << std::endl;
+        std::cout << "Async event code: " << async_md.event_code << std::endl;
 
         //handle the error codes
         switch(async_md.event_code)
@@ -1257,8 +1345,9 @@ void benchmark_tx_rate_async_helper(
                 break;
         }
     }
-
+    std::cerr << HEADER_AS"Waiting for lock..." << std::endl;
     l.lock();
+    std::cerr << HEADER_AS"Acquired lock" << std::endl;
     tx_async_thread_finished = true;
 
     if (tx_async_interrupt_disabler)
@@ -1336,7 +1425,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     size_t tx_sleep_delay;
     size_t rx_sleep_delay;
     size_t rx_sample_limit;
-    std::string rx_file;
+    std::string rx_file, tx_file;
     std::string time_source, clock_source;
     std::string tx_ant, rx_ant;
     std::string tx_subdev, rx_subdev;
@@ -1413,6 +1502,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         ("rx-sleep-delay", po::value<size_t>(&rx_sleep_delay)->default_value(1000), "RX sleep delay (us)")
         ("rx-sample-limit", po::value<size_t>(&rx_sample_limit)->default_value(0), "total number of samples to receive (0 implies continuous streaming)")
         ("rx-file", po::value<std::string>(&rx_file)->default_value(""), "RX capture file path")
+        ("tx-file", po::value<std::string>(&tx_file)->default_value(""), "TX capture file path")
 		("checker", po::value<double>(&checker_thread_interval), "checker thread interval (s)")
         ("set-time", po::value<std::string>(&set_time_mode)->default_value(""), "set mode (now, next_pps, unknown_pps)")
 		("manual-time", po::value<std::string>(&set_time_time)->default_value("zero"), "manual time reference (zero, local, utc, gpsdo)")
@@ -2030,7 +2120,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 {
                     std::cout << boost::format(HEADER_RX"Will receive a total of %ld samples") % rx_sample_limit << std::endl;
                     const size_t upper_rx_sample_limit = 0x0FFFFFFF;
-                    if (rx_sample_limit > upper_rx_sample_limit)
+                    if (rx_sample_limit > upper_rx_sample_limit) // FIXME: Could enforce limit in RX thread
                         std::cout << boost::format(HEADER_WARN"Total number of requested samples (%ld) is greater than limit (%ld)") % rx_sample_limit % upper_rx_sample_limit << std::endl;
                 }
 
@@ -2239,6 +2329,18 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                     std::cout << HEADER_TX"Will use EOB" << std::endl;
                 else
                     std::cout << HEADER_TX"Will not use EOB" << std::endl;
+
+                if (tx_file.empty() == false)
+                {
+                    tx_params.tx_file = new std::ifstream(tx_file.c_str(), std::ios::in | std::ios::binary);
+                    
+                    if (tx_params.tx_file->is_open())
+                        std::cout << boost::format(HEADER_TX"Transmitting contents of \"%s\"") % tx_file << std::endl;
+                    else
+                        std::cout << boost::format(HEADER_ERROR"Cannot open file for transmit: \"%s\"") % tx_file << std::endl;
+                }
+                else
+                    tx_params.tx_file = NULL;
 
                 tx_params.start_time = time_start;
                 tx_params.send_timeout = send_timeout;
