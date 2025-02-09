@@ -148,6 +148,15 @@ static void sig_int_handler(int signal)
 		std::cout << ss.str();
 	}
 
+    if (running == false)
+    {
+        std::stringstream ss;
+		ss << HEADER "No longer running" << std::endl;
+		std::cout << ss.str();
+        
+        return;
+    }
+
     boost::mutex::scoped_lock l(stop_mutex);
     running = false;
     stop_signal_called = true;
@@ -840,6 +849,7 @@ typedef struct TxParams {
     double tx_freq_delay;
     double tx_lo_offset;
     std::ifstream* tx_file;
+    bool loop_tx_file;
 } TX_PARAMS;
 
 void benchmark_tx_rate(
@@ -1076,6 +1086,7 @@ void benchmark_tx_rate(
         }
 
         bool tx_file_end = false;
+        size_t file_read = -1;
         
         if ((params.tx_file != NULL) &&
             ((num_send_calls == 0) || (last_sent > 0)))
@@ -1087,29 +1098,37 @@ void benchmark_tx_rate(
                 std::cout << ss.str();
             }
             
-            size_t file_read = 0;
+            file_read = 0;
             while (file_read < buff_len)
             {
-                if (file_read > 0)
+                if ((file_read > 0) && (params.loop_tx_file == false))
                 {
                     std::stringstream ss;
                     ss << HEADER_TX"Already read: " << file_read << std::endl;
                     std::cout << ss.str();
                 }
-                
-                params.tx_file->read((char*)&buff.front() + file_read, buff_len);
+
+                params.tx_file->read((char*)&buff.front() + file_read, (buff_len - file_read));
                 size_t _read = params.tx_file->gcount();
                 file_read += _read;
                 if (params.tx_file->eof())
                 {
+                    if (params.loop_tx_file)
+                    {
+                        std::stringstream ss;
+                        ss << HEADER_TX"Looping file..." << std::endl;
+                        std::cout << ss.str();
+
+                        params.tx_file->clear();
+                        params.tx_file->seekg(0);
+                        continue;
+                    }
+
                     std::stringstream ss;
                     ss << HEADER_TX"File EOF" << std::endl;
                     std::cout << ss.str();
 
                     tx_file_end = true;
-
-                    // FIXME: Optional loop
-                    //param.tx_file->seekg(0);
 
                     break;
                 }
@@ -1132,7 +1151,12 @@ void benchmark_tx_rate(
                 md.end_of_burst = true;
         }
 
-        size_t nsent = tx_stream->send(buffs, to_send, md, timeout); // FIXME: Is 'to_send' (formerly 'total_length') always correct?
+        if (file_read != -1)
+            to_send = (file_read / bpi);
+
+        size_t nsent = 0;
+        if (to_send > 0)
+            nsent = tx_stream->send(buffs, to_send, md, timeout); // FIXME: Is 'to_send' (formerly 'total_length') always correct?
         last_sent = 0; // Filled in below on full burst completion
         ++num_send_calls;
 
@@ -1317,18 +1341,18 @@ void benchmark_tx_rate_async_helper(
 
     //while (not boost::this_thread::interruption_requested()){
     while (running) {
-        //std::cout << "Running: " << running << std::endl;
+        std::cout << "Running: " << running << std::endl;
         std::cout.flush();
         if (not tx_stream->recv_async_msg(async_md, (skip ? 0 : timeout)))
         {
-            //std::cout << "-" << std::endl;
+            std::cout << "-" << std::endl;
             skip = false;
             continue;
         }
 
         //skip = true;
 
-        //std::cout << "Async event code: " << async_md.event_code << std::endl;
+        std::cout << "Async event code: " << async_md.event_code << std::endl;
 
         //handle the error codes
         switch(async_md.event_code)
@@ -1364,6 +1388,7 @@ void benchmark_tx_rate_async_helper(
         }
     }
     std::cerr << HEADER_AS"Waiting for lock..." << std::endl;
+    std::cerr.flush();
     l.lock();
     std::cerr << HEADER_AS"Acquired lock" << std::endl;
     tx_async_thread_finished = true;
@@ -1555,6 +1580,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         // record TX times?
 		("rx-timing-file", "store RX timing data")
         ("rx-file-loop-size", po::value<size_t>(&rx_file_loop_size), "after how many bytes to loop capture file (bytes)")
+        ("loop-tx-file", "continuously loop TX file")
         // Optional interruption
         // simulate u / o at random / pulses
         // exit on O / other error
@@ -1614,6 +1640,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
     bool ignore_timeout = (vm.count("ignore-timeout") > 0);
     bool ignore_unexpected_error = (vm.count("ignore-unexpected") > 0);
 	bool rx_timing_file = (vm.count("rx-timing-file") > 0);
+    bool loop_tx_file = (vm.count("loop-tx-file") > 0);
 
     boost::posix_time::time_duration interrupt_timeout_duration(boost::posix_time::seconds(long(interrupt_timeout)) + boost::posix_time::microseconds(long((interrupt_timeout - floor(interrupt_timeout))*1e6)));
 
@@ -1891,12 +1918,13 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
             boost::this_thread::sleep(boost::posix_time::seconds(1));
         }
 
+        uhd::time_spec_t new_time = uhd::time_spec_t(0.0);
+        bool new_time_set = false;
+        
 		if (mode != "mimo")
 		{
             if (set_time_mode.empty() == false)
             {
-				uhd::time_spec_t new_time = uhd::time_spec_t(0.0);
-
 				if ((set_time_time == "local") || (set_time_time == "utc"))
 				{
 					expect_valid_time_date = true;
@@ -2029,18 +2057,21 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 {
                     usrp->set_time_now(new_time);
                     std::cout << boost::format(HEADER "Time set now") << std::endl;
+                    new_time_set = true;
                 }
                 else if (set_time_mode == "next_pps")
                 {
                     usrp->set_time_next_pps(new_time);
                     std::cout << boost::format(HEADER "Time set next PPS (pausing to latch...)") << std::endl;
 					boost::this_thread::sleep(boost::posix_time::seconds(1));
+                    new_time_set = true;
                 }
                 else if (set_time_mode == "unknown_pps")
                 {
                     usrp->set_time_unknown_pps(new_time);
                     std::cout << boost::format(HEADER "Time set unknown PPS (pausing to latch...)") << std::endl;
 					boost::this_thread::sleep(boost::posix_time::seconds(1));	// Guessing sleep is needed here too
+                    new_time_set = true;
                 }
                 else
                 {
@@ -2069,7 +2100,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
             }
         }
 
-        uhd::time_spec_t time_start = usrp->get_time_now();	// Usually DSP #0 on mboard #0
+        uhd::time_spec_t time_now = usrp->get_time_now();	// Usually DSP #0 on mboard #0
+        uhd::time_spec_t time_start = (new_time_set ? new_time : time_now);
 
         std::cout << boost::format(HEADER "Time now: %f seconds (%llu ticks)") % time_start.get_real_secs() % time_start.to_ticks(usrp->get_master_clock_rate()) << std::endl;
 
@@ -2381,6 +2413,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
                 tx_params.tx_freq = tx_freq;
                 tx_params.tx_freq_delay = tx_freq_delay;
                 tx_params.tx_lo_offset = tx_lo_offset;
+                tx_params.loop_tx_file = loop_tx_file;
 
                 thread_group.create_thread(boost::bind(&benchmark_tx_rate,
                     usrp,
@@ -2426,6 +2459,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
         {
             if ((rx_sample_limit > 0) && (tx_channel_nums.size() == 0))
             {
+                std::cout << HEADER "Waiting for RX to complete..." << std::endl;
                 rx_thread_complete.wait(l_stop);
             }
             else if (interactive)
@@ -2501,6 +2535,11 @@ int UHD_SAFE_MAIN(int argc, char *argv[]){
 					abort_event.timed_wait(l_stop, boost::posix_time::seconds(secs) + boost::posix_time::microseconds(usecs));
 					//boost::this_thread::sleep(boost::posix_time::seconds(secs) + boost::posix_time::microseconds(usecs));
 				}
+            }
+            else if ((tx_channel_nums.size() > 0) && (loop_tx_file == false))
+            {
+                std::cout << HEADER "Waiting for TX file to complete..." << std::endl;
+                tx_thread_complete.wait(l_stop);
             }
             else
             {
